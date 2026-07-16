@@ -30,7 +30,7 @@ func TestHolmesTarget_Dispatch(t *testing.T) {
 	}))
 	defer server.Close()
 
-	target := NewHolmesTarget(server.URL)
+	target := NewHolmesTarget(server.URL, server.Client())
 	event := models.RolloutEvent{
 		ClusterID:      "test-cluster",
 		ClusterName:    "prod-us-east-1",
@@ -57,7 +57,7 @@ func TestHolmesTarget_ServerError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	target := NewHolmesTarget(server.URL)
+	target := NewHolmesTarget(server.URL, server.Client())
 	event := models.RolloutEvent{
 		ClusterName:    "test",
 		Namespace:      "default",

@@ -19,12 +19,11 @@ import (
 	"github.com/koolhandluke/k8s-deploy-monitor-operator/internal/models"
 )
 
-// HashCallback is called when a template hash changes so it can be persisted.
-// deployKey is "namespace/name", not prefixed with clusterID.
-type HashCallback func(clusterID, deployKey, hash string)
-
-// HashDeleteCallback is called when a deployment is deleted.
-type HashDeleteCallback func(clusterID, deployKey string)
+// HashObserver receives template hash changes for persistence.
+type HashObserver interface {
+	OnHashUpdate(clusterID, deployKey, hash string)
+	OnHashDelete(clusterID, deployKey string)
+}
 
 // ClusterWatcher watches deployments on a single cluster using SharedInformerFactory.
 type ClusterWatcher struct {
@@ -39,8 +38,7 @@ type ClusterWatcher struct {
 	factory       informers.SharedInformerFactory
 	cancel        context.CancelFunc
 
-	onHashUpdate HashCallback
-	onHashDelete HashDeleteCallback
+	hashObserver HashObserver
 }
 
 func NewClusterWatcher(
@@ -48,8 +46,7 @@ func NewClusterWatcher(
 	clientset kubernetes.Interface,
 	debouncer *Debouncer,
 	nsFilter func(string) bool,
-	onHashUpdate HashCallback,
-	onHashDelete HashDeleteCallback,
+	hashObserver HashObserver,
 ) *ClusterWatcher {
 	return &ClusterWatcher{
 		clusterID:     clusterID,
@@ -58,8 +55,7 @@ func NewClusterWatcher(
 		debouncer:     debouncer,
 		nsFilter:      nsFilter,
 		templateCache: make(map[string]string),
-		onHashUpdate:  onHashUpdate,
-		onHashDelete:  onHashDelete,
+		hashObserver:  hashObserver,
 	}
 }
 
@@ -152,8 +148,8 @@ func (w *ClusterWatcher) onAdd(obj interface{}) {
 	w.templateCache[fullKey] = hash
 	w.mu.Unlock()
 
-	if w.onHashUpdate != nil {
-		w.onHashUpdate(w.clusterID, deployKey, hash)
+	if w.hashObserver != nil {
+		w.hashObserver.OnHashUpdate(w.clusterID, deployKey, hash)
 	}
 }
 
@@ -177,12 +173,25 @@ func (w *ClusterWatcher) onUpdate(oldObj, newObj interface{}) {
 	w.mu.Unlock()
 
 	// Persist the new hash
-	if w.onHashUpdate != nil {
-		w.onHashUpdate(w.clusterID, deployKey, newHash)
+	if w.hashObserver != nil {
+		w.hashObserver.OnHashUpdate(w.clusterID, deployKey, newHash)
 	}
 
-	if !exists || newHash == oldHash {
-		return // status update, scale change, or first time seeing this deployment
+	if !exists {
+		slog.Debug("update for unseen deployment, seeding cache",
+			"cluster", w.clusterName,
+			"deployment", deployKey,
+			"hash", newHash[:12],
+		)
+		return
+	}
+	if newHash == oldHash {
+		slog.Debug("update with unchanged template hash, skipping",
+			"cluster", w.clusterName,
+			"deployment", deployKey,
+			"hash", newHash[:12],
+		)
+		return
 	}
 
 	oldDeploy, _ := oldObj.(*appsv1.Deployment)
@@ -226,8 +235,8 @@ func (w *ClusterWatcher) onDelete(obj interface{}) {
 	delete(w.templateCache, fullKey)
 	w.mu.Unlock()
 
-	if w.onHashDelete != nil {
-		w.onHashDelete(w.clusterID, deployKey)
+	if w.hashObserver != nil {
+		w.hashObserver.OnHashDelete(w.clusterID, deployKey)
 	}
 }
 

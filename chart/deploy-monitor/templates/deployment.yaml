@@ -1,0 +1,55 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "deploy-monitor.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "deploy-monitor.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "deploy-monitor.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "deploy-monitor.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "deploy-monitor.serviceAccountName" . }}
+      containers:
+        - name: monitor
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: DISPATCH_MODE
+              value: {{ .Values.dispatch.mode | quote }}
+            {{- if .Values.dispatch.holmesApiUrl }}
+            - name: HOLMES_API_URL
+              value: {{ .Values.dispatch.holmesApiUrl | quote }}
+            {{- end }}
+            {{- if .Values.dispatch.slackWebhookUrl }}
+            - name: SLACK_WEBHOOK_URL
+              value: {{ .Values.dispatch.slackWebhookUrl | quote }}
+            {{- end }}
+            {{- if .Values.namespaceFilter.allowlist }}
+            - name: NAMESPACE_ALLOWLIST
+              value: {{ join "," .Values.namespaceFilter.allowlist | quote }}
+            {{- end }}
+            {{- if .Values.namespaceFilter.denylist }}
+            - name: NAMESPACE_DENYLIST
+              value: {{ join "," .Values.namespaceFilter.denylist | quote }}
+            {{- end }}
+            - name: WORKER_COUNT
+              value: {{ .Values.tuning.workerCount | quote }}
+            - name: DEBOUNCE_SECONDS
+              value: {{ .Values.tuning.debounceSeconds | quote }}
+            - name: QUEUE_MAX_SIZE
+              value: {{ .Values.tuning.queueMaxSize | quote }}
+            {{- if .Values.persistence.enabled }}
+            - name: PERSISTENCE_ENABLED
+              value: "true"
+            - name: PERSISTENCE_NAMESPACE
+              value: {{ default .Release.Namespace .Values.persistence.namespace | quote }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}

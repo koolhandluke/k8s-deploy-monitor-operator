@@ -1,0 +1,18 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "deploy-monitor.fullname" . }}
+  labels:
+    {{- include "deploy-monitor.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch"]
+  {{- if .Values.persistence.enabled }}
+  - apiGroups: ["deploy-monitor.io"]
+    resources: ["clusterrolloutstates", "rolloutrecords"]
+    verbs: ["get", "list", "create", "update", "patch"]
+  - apiGroups: ["deploy-monitor.io"]
+    resources: ["clusterrolloutstates/status", "rolloutrecords/status"]
+    verbs: ["get", "update", "patch"]
+  {{- end }}

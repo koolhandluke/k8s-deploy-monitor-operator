@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/koolhandluke/k8s-deploy-monitor-operator/internal/models"
 )
@@ -19,10 +18,10 @@ type SlackTarget struct {
 	client     *http.Client
 }
 
-func NewSlackTarget(webhookURL string) *SlackTarget {
+func NewSlackTarget(webhookURL string, client *http.Client) *SlackTarget {
 	return &SlackTarget{
 		webhookURL: webhookURL,
-		client:     &http.Client{Timeout: 10 * time.Second},
+		client:     client,
 	}
 }
 

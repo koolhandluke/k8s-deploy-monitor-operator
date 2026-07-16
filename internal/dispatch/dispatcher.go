@@ -3,7 +3,9 @@ package dispatch
 import (
 	"context"
 	"log/slog"
+	"net/http"
 	"sync"
+	"time"
 
 	v1alpha1 "github.com/koolhandluke/k8s-deploy-monitor-operator/api/v1alpha1"
 	"github.com/koolhandluke/k8s-deploy-monitor-operator/internal/config"
@@ -19,53 +21,58 @@ type Target interface {
 
 // Dispatcher consumes rollout events from a channel and dispatches to configured targets.
 type Dispatcher struct {
-	eventCh chan models.RolloutEvent
-	targets []Target
-	workers int
-	store   *persistence.Store // nil if persistence disabled
+	eventCh  chan models.RolloutEvent
+	targets  []Target
+	workers  int
+	recorder *persistence.AuditRecorder // nil if persistence disabled
+	wg       sync.WaitGroup
 }
 
-func NewDispatcher(cfg *config.Config, eventCh chan models.RolloutEvent, store *persistence.Store) *Dispatcher {
+func NewDispatcher(cfg *config.Config, eventCh chan models.RolloutEvent, recorder *persistence.AuditRecorder) *Dispatcher {
 	d := &Dispatcher{
-		eventCh: eventCh,
-		workers: cfg.WorkerCount,
-		store:   store,
+		eventCh:  eventCh,
+		workers:  cfg.WorkerCount,
+		recorder: recorder,
 	}
 
 	// Always log
 	d.targets = append(d.targets, &LogTarget{})
 
+	// Audit persistence
+	if recorder != nil {
+		d.targets = append(d.targets, NewAuditTarget(recorder))
+	}
+
 	// Holmes
 	if cfg.DispatchMode == config.DispatchHolmes || cfg.DispatchMode == config.DispatchBoth {
-		d.targets = append(d.targets, NewHolmesTarget(cfg.HolmesAPIURL))
+		d.targets = append(d.targets, NewHolmesTarget(cfg.HolmesAPIURL, &http.Client{Timeout: 5 * time.Minute}))
 	}
 
 	// Slack
 	if cfg.DispatchMode == config.DispatchSlack || cfg.DispatchMode == config.DispatchBoth {
-		d.targets = append(d.targets, NewSlackTarget(cfg.SlackWebhookURL))
+		d.targets = append(d.targets, NewSlackTarget(cfg.SlackWebhookURL, &http.Client{Timeout: 10 * time.Second}))
 	}
 
 	return d
 }
 
-// Start launches worker goroutines that consume events until ctx is cancelled.
+// Start launches worker goroutines that consume events until the event channel is closed.
 func (d *Dispatcher) Start(ctx context.Context) {
-	var wg sync.WaitGroup
-
 	for i := 0; i < d.workers; i++ {
-		wg.Add(1)
+		d.wg.Add(1)
 		go func(workerID int) {
-			defer wg.Done()
+			defer d.wg.Done()
 			d.worker(ctx, workerID)
 		}(i)
 	}
 
 	slog.Info("dispatcher started", "workers", d.workers, "targets", d.targetNames())
+}
 
-	go func() {
-		wg.Wait()
-		slog.Info("all dispatcher workers stopped")
-	}()
+// Wait blocks until all dispatcher workers have exited.
+func (d *Dispatcher) Wait() {
+	d.wg.Wait()
+	slog.Info("all dispatcher workers stopped")
 }
 
 func (d *Dispatcher) worker(ctx context.Context, id int) {
@@ -76,13 +83,6 @@ func (d *Dispatcher) worker(ctx context.Context, id int) {
 		case event, ok := <-d.eventCh:
 			if !ok {
 				return
-			}
-
-			// Record the rollout event as a CRD
-			if d.store != nil {
-				if err := d.store.RecordRollout(ctx, event); err != nil {
-					slog.Error("failed to record rollout", "error", err)
-				}
 			}
 
 			// Dispatch to all targets
@@ -103,12 +103,12 @@ func (d *Dispatcher) worker(ctx context.Context, id int) {
 			}
 
 			// Update record status after dispatch
-			if d.store != nil {
+			if d.recorder != nil {
 				phase := v1alpha1.PhaseDispatched
 				if dispatchErr != "" {
 					phase = v1alpha1.PhaseFailed
 				}
-				d.store.UpdateRecordStatus(ctx, event, phase, targetNames, dispatchErr)
+				d.recorder.UpdateRecordStatus(ctx, event, phase, targetNames, dispatchErr)
 			}
 		}
 	}

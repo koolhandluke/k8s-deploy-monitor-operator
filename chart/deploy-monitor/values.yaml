@@ -1,0 +1,40 @@
+image:
+  repository: ghcr.io/koolhandluke/k8s-deploy-monitor-operator
+  tag: latest
+  pullPolicy: IfNotPresent
+
+dispatch:
+  mode: log  # log | holmes | slack | both
+  holmesApiUrl: ""
+  slackWebhookUrl: ""
+
+namespaceFilter:
+  allowlist: []
+  denylist:
+    - kube-system
+    - kube-public
+    - kube-node-lease
+
+persistence:
+  enabled: true
+  namespace: ""  # defaults to release namespace
+
+tuning:
+  workerCount: 3
+  debounceSeconds: 30
+  queueMaxSize: 100
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 128Mi
+
+serviceAccount:
+  create: true
+  name: ""
+
+namespace:
+  create: false

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -22,17 +23,26 @@ import (
 )
 
 func main() {
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
-
 	cfg, err := config.Load()
 	if err != nil {
 		slog.Error("failed to load config", "error", err)
 		os.Exit(1)
 	}
 
+	logLevel := slog.LevelInfo
+	if cfg.Debug {
+		logLevel = slog.LevelDebug
+	}
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel})))
+
 	clusters, err := config.LoadClusters(cfg)
 	if err != nil {
 		slog.Error("failed to load cluster configs", "error", err)
+		os.Exit(1)
+	}
+
+	if len(clusters) == 0 {
+		slog.Error("no clusters configured")
 		os.Exit(1)
 	}
 
@@ -45,18 +55,22 @@ func main() {
 	)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
 	// Set up persistence if enabled
-	var store *persistence.Store
+	var hashStore *persistence.HashStore
+	var recorder *persistence.AuditRecorder
 	if cfg.PersistenceEnabled {
-		store, err = initPersistence(clusters, cfg.PersistenceNamespace)
+		c, err := initK8sClient(clusters)
 		if err != nil {
-			slog.Error("failed to initialize persistence", "error", err)
+			slog.Error("failed to initialize persistence client", "error", err)
 			os.Exit(1)
 		}
+
+		hashStore = persistence.NewHashStore(c, cfg.PersistenceNamespace)
+		recorder = persistence.NewAuditRecorder(c, cfg.PersistenceNamespace)
+
 		// Start batched hash flush loop (every 5s with jitter)
-		go store.FlushLoop(ctx, 5*time.Second)
+		go hashStore.FlushLoop(ctx, 5*time.Second)
 		slog.Info("persistence enabled", "namespace", cfg.PersistenceNamespace)
 	}
 
@@ -64,7 +78,7 @@ func main() {
 	eventCh := make(chan models.RolloutEvent, cfg.QueueMaxSize)
 
 	// Start dispatcher
-	dispatcher := dispatch.NewDispatcher(cfg, eventCh, store)
+	dispatcher := dispatch.NewDispatcher(cfg, eventCh, recorder)
 	dispatcher.Start(ctx)
 
 	// Start cluster watch manager
@@ -73,7 +87,7 @@ func main() {
 		cfg.NamespaceAllowed,
 		time.Duration(cfg.DebounceSeconds)*time.Second,
 		eventCh,
-		store,
+		hashStore,
 	)
 
 	if err := manager.Start(ctx); err != nil {
@@ -87,28 +101,24 @@ func main() {
 	sig := <-sigCh
 
 	slog.Info("shutdown signal received", "signal", sig)
-	cancel()
 	manager.Stop()
 	close(eventCh)
+	dispatcher.Wait()
+	cancel()
 
 	slog.Info("rollout monitor stopped")
 }
 
-func initPersistence(clusters []config.ClusterInfo, namespace string) (*persistence.Store, error) {
+func initK8sClient(clusters []config.ClusterInfo) (client.Client, error) {
 	// Use the first cluster's rest config to connect to the central cluster
 	// (where CRDs live). For local dev this is the same cluster.
 	if len(clusters) == 0 {
-		return nil, nil
+		return nil, fmt.Errorf("no clusters configured")
 	}
 
 	scheme := runtime.NewScheme()
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(v1alpha1.AddToScheme(scheme))
 
-	c, err := client.New(clusters[0].RestConfig, client.Options{Scheme: scheme})
-	if err != nil {
-		return nil, err
-	}
-
-	return persistence.NewStore(c, namespace), nil
+	return client.New(clusters[0].RestConfig, client.Options{Scheme: scheme})
 }

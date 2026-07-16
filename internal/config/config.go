@@ -38,6 +38,9 @@ type Config struct {
 	// Persistence
 	PersistenceEnabled   bool
 	PersistenceNamespace string
+
+	// Logging
+	Debug bool
 }
 
 func Load() (*Config, error) {
@@ -83,6 +86,9 @@ func Load() (*Config, error) {
 	c.WorkerCount = envInt("WORKER_COUNT", 3)
 	c.DebounceSeconds = envInt("DEBOUNCE_SECONDS", 30)
 	c.QueueMaxSize = envInt("QUEUE_MAX_SIZE", 100)
+
+	// Logging
+	c.Debug = strings.ToLower(os.Getenv("DEBUG")) == "true"
 
 	// Persistence
 	c.PersistenceEnabled = strings.ToLower(os.Getenv("PERSISTENCE_ENABLED")) == "true"

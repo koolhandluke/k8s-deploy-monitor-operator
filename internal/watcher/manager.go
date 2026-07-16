@@ -12,13 +12,26 @@ import (
 	"github.com/koolhandluke/k8s-deploy-monitor-operator/internal/persistence"
 )
 
+// hashObserverAdapter adapts a HashStore to the HashObserver interface.
+type hashObserverAdapter struct {
+	store *persistence.HashStore
+}
+
+func (a *hashObserverAdapter) OnHashUpdate(clusterID, deployKey, hash string) {
+	a.store.BufferHash(clusterID, deployKey, hash)
+}
+
+func (a *hashObserverAdapter) OnHashDelete(clusterID, deployKey string) {
+	a.store.RemoveHash(clusterID, deployKey)
+}
+
 // Manager manages cluster watchers across one or more clusters.
 type Manager struct {
 	clusters  []config.ClusterInfo
 	nsFilter  func(string) bool
 	debouncer *Debouncer
 	watchers  []*ClusterWatcher
-	store     *persistence.Store // nil if persistence disabled
+	store     *persistence.HashStore // nil if persistence disabled
 }
 
 func NewManager(
@@ -26,7 +39,7 @@ func NewManager(
 	nsFilter func(string) bool,
 	debounceWindow time.Duration,
 	eventCh chan<- models.RolloutEvent,
-	store *persistence.Store,
+	store *persistence.HashStore,
 ) *Manager {
 	return &Manager{
 		clusters:  clusters,
@@ -38,16 +51,10 @@ func NewManager(
 
 // Start launches a watcher per cluster with staggered startup (1s between clusters).
 func (m *Manager) Start(ctx context.Context) error {
-	// Hash persistence callbacks
-	var onHashUpdate HashCallback
-	var onHashDelete HashDeleteCallback
+	// Build HashObserver from store (nil if persistence disabled)
+	var observer HashObserver
 	if m.store != nil {
-		onHashUpdate = func(clusterID, deployKey, hash string) {
-			m.store.BufferHash(clusterID, deployKey, hash)
-		}
-		onHashDelete = func(clusterID, deployKey string) {
-			m.store.RemoveHash(clusterID, deployKey)
-		}
+		observer = &hashObserverAdapter{store: m.store}
 	}
 
 	for i, cluster := range m.clusters {
@@ -64,8 +71,7 @@ func (m *Manager) Start(ctx context.Context) error {
 			clientset,
 			m.debouncer,
 			m.nsFilter,
-			onHashUpdate,
-			onHashDelete,
+			observer,
 		)
 
 		// Seed persisted hashes before starting (enables gap detection)

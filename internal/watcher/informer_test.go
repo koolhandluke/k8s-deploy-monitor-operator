@@ -48,7 +48,7 @@ func TestClusterWatcher_DetectsRollout(t *testing.T) {
 	debouncer := NewDebouncer(100*time.Millisecond, eventCh)
 	defer debouncer.Stop()
 
-	w := NewClusterWatcher("test-cluster", "test-cluster", clientset, debouncer, func(string) bool { return true }, nil, nil)
+	w := NewClusterWatcher("test-cluster", "test-cluster", clientset, debouncer, func(string) bool { return true }, nil)
 	if err := w.Start(ctx); err != nil {
 		t.Fatalf("failed to start watcher: %v", err)
 	}
@@ -91,7 +91,7 @@ func TestClusterWatcher_IgnoresStatusUpdates(t *testing.T) {
 	debouncer := NewDebouncer(50*time.Millisecond, eventCh)
 	defer debouncer.Stop()
 
-	w := NewClusterWatcher("test-cluster", "test-cluster", clientset, debouncer, func(string) bool { return true }, nil, nil)
+	w := NewClusterWatcher("test-cluster", "test-cluster", clientset, debouncer, func(string) bool { return true }, nil)
 	if err := w.Start(ctx); err != nil {
 		t.Fatalf("failed to start watcher: %v", err)
 	}
@@ -128,7 +128,7 @@ func TestClusterWatcher_NamespaceFilter(t *testing.T) {
 	// Filter out kube-system
 	nsFilter := func(ns string) bool { return ns != "kube-system" }
 
-	w := NewClusterWatcher("test-cluster", "test-cluster", clientset, debouncer, nsFilter, nil, nil)
+	w := NewClusterWatcher("test-cluster", "test-cluster", clientset, debouncer, nsFilter, nil)
 	if err := w.Start(ctx); err != nil {
 		t.Fatalf("failed to start watcher: %v", err)
 	}

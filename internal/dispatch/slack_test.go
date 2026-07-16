@@ -23,7 +23,7 @@ func TestSlackTarget_Dispatch(t *testing.T) {
 	}))
 	defer server.Close()
 
-	target := NewSlackTarget(server.URL)
+	target := NewSlackTarget(server.URL, server.Client())
 	event := models.RolloutEvent{
 		ClusterName:    "prod-us-east-1",
 		Namespace:      "default",
@@ -54,7 +54,7 @@ func TestSlackTarget_ServerError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	target := NewSlackTarget(server.URL)
+	target := NewSlackTarget(server.URL, server.Client())
 	err := target.Dispatch(context.Background(), models.RolloutEvent{
 		DeploymentName: "app",
 		OldImages:      []string{"app:v1"},

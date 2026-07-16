@@ -1,0 +1,6 @@
+apiVersion: v2
+name: deploy-monitor
+description: Kubernetes Deployment rollout monitor with configurable dispatch targets
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

@@ -19,17 +19,17 @@ type HolmesTarget struct {
 	client *http.Client
 }
 
-func NewHolmesTarget(apiURL string) *HolmesTarget {
+func NewHolmesTarget(apiURL string, client *http.Client) *HolmesTarget {
 	return &HolmesTarget{
 		apiURL: strings.TrimRight(apiURL, "/"),
-		client: &http.Client{Timeout: 30 * time.Second},
+		client: client,
 	}
 }
 
 func (h *HolmesTarget) Name() string { return "holmes" }
 
 type holmesChatRequest struct {
-	Query string `json:"user_prompt"`
+	Ask string `json:"ask"`
 }
 
 func (h *HolmesTarget) Dispatch(ctx context.Context, event models.RolloutEvent) error {
@@ -42,7 +42,7 @@ func (h *HolmesTarget) Dispatch(ctx context.Context, event models.RolloutEvent) 
 		strings.Join(event.NewImages, ", "),
 	)
 
-	body := holmesChatRequest{Query: query}
+	body := holmesChatRequest{Ask: query}
 	jsonBody, err := json.Marshal(body)
 	if err != nil {
 		return fmt.Errorf("marshaling holmes request: %w", err)
