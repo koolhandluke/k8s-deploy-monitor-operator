@@ -1,0 +1,71 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: rollout-monitor
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: rollout-monitor
+  namespace: rollout-monitor
+---
+# ClusterRole with read-only access to deployments across all namespaces
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: rollout-monitor
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: rollout-monitor
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: rollout-monitor
+subjects:
+  - kind: ServiceAccount
+    name: rollout-monitor
+    namespace: rollout-monitor
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rollout-monitor
+  namespace: rollout-monitor
+  labels:
+    app: rollout-monitor
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: rollout-monitor
+  template:
+    metadata:
+      labels:
+        app: rollout-monitor
+    spec:
+      serviceAccountName: rollout-monitor
+      containers:
+        - name: monitor
+          image: rollout-monitor:latest
+          env:
+            - name: DISPATCH_MODE
+              value: "log"
+            - name: NAMESPACE_DENYLIST
+              value: "kube-system,kube-public,kube-node-lease,rollout-monitor"
+            - name: DEBOUNCE_SECONDS
+              value: "30"
+            - name: WORKER_COUNT
+              value: "3"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi

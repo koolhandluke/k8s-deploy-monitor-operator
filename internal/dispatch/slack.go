@@ -1,0 +1,68 @@
+package dispatch
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/koolhandluke/k8s-deploy-monitor-operator/internal/models"
+)
+
+// SlackTarget sends rollout notifications to a Slack webhook.
+type SlackTarget struct {
+	webhookURL string
+	client     *http.Client
+}
+
+func NewSlackTarget(webhookURL string) *SlackTarget {
+	return &SlackTarget{
+		webhookURL: webhookURL,
+		client:     &http.Client{Timeout: 10 * time.Second},
+	}
+}
+
+func (s *SlackTarget) Name() string { return "slack" }
+
+type slackMessage struct {
+	Text string `json:"text"`
+}
+
+func (s *SlackTarget) Dispatch(ctx context.Context, event models.RolloutEvent) error {
+	text := fmt.Sprintf(
+		"*Rollout detected:* `%s` (`%s`) on *%s*\n%s → %s",
+		event.DeploymentName,
+		event.Namespace,
+		event.ClusterName,
+		strings.Join(event.OldImages, ", "),
+		strings.Join(event.NewImages, ", "),
+	)
+
+	body, _ := json.Marshal(slackMessage{Text: text})
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.webhookURL, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("creating slack request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("slack webhook failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("slack webhook returned %d", resp.StatusCode)
+	}
+
+	slog.Info("dispatched to slack",
+		"cluster", event.ClusterName,
+		"deployment", event.Namespace+"/"+event.DeploymentName,
+	)
+	return nil
+}
