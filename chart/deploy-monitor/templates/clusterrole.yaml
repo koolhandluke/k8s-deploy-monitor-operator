@@ -8,6 +8,12 @@ rules:
   - apiGroups: ["apps"]
     resources: ["deployments"]
     verbs: ["get", "list", "watch"]
+  - apiGroups: ["deploy-monitor.io"]
+    resources: ["monitorconfigs"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["deploy-monitor.io"]
+    resources: ["monitorconfigs/status"]
+    verbs: ["get", "update", "patch"]
   {{- if .Values.persistence.enabled }}
   - apiGroups: ["deploy-monitor.io"]
     resources: ["clusterrolloutstates", "rolloutrecords"]
