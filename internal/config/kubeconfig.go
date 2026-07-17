@@ -1,6 +1,7 @@
 package config
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"log/slog"
 	"os"
@@ -40,7 +41,7 @@ func loadFromDirectory(dir string) ([]ClusterInfo, error) {
 			continue
 		}
 		name := entry.Name()
-		if !strings.HasSuffix(name, ".yaml") && !strings.HasSuffix(name, ".yml") && !strings.HasSuffix(name, ".conf") {
+		if !isKubeconfigFile(name) {
 			continue
 		}
 
@@ -57,7 +58,7 @@ func loadFromDirectory(dir string) ([]ClusterInfo, error) {
 			continue
 		}
 
-		stem := strings.TrimSuffix(strings.TrimSuffix(strings.TrimSuffix(name, ".yaml"), ".yml"), ".conf")
+		stem := filenameStem(name)
 		clusters = append(clusters, ClusterInfo{
 			ID:         stem,
 			Name:       stem,
@@ -107,4 +108,71 @@ func loadFromKubeconfig(kubeconfigPath string) ([]ClusterInfo, error) {
 			RestConfig: restCfg,
 		},
 	}, nil
+}
+
+// ClusterSnapshot holds clusters and file content hashes from a directory scan.
+type ClusterSnapshot struct {
+	Clusters   []ClusterInfo
+	FileHashes map[string]string // clusterID → SHA256 of raw file bytes
+}
+
+// LoadDirectorySnapshot reads kubeconfig files from a directory and returns
+// clusters with SHA256 hashes of each file's raw bytes. The hashes allow
+// detecting file changes without unnecessary watcher restarts.
+func LoadDirectorySnapshot(dir string) (*ClusterSnapshot, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("reading kubeconfig dir %s: %w", dir, err)
+	}
+
+	snap := &ClusterSnapshot{
+		FileHashes: make(map[string]string),
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !isKubeconfigFile(name) {
+			continue
+		}
+
+		path := filepath.Join(dir, name)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			slog.Error("failed to read kubeconfig", "path", path, "error", err)
+			continue
+		}
+
+		restCfg, err := clientcmd.RESTConfigFromKubeConfig(data)
+		if err != nil {
+			slog.Error("failed to parse kubeconfig", "path", path, "error", err)
+			continue
+		}
+
+		stem := filenameStem(name)
+		hash := fmt.Sprintf("%x", sha256.Sum256(data))
+
+		snap.Clusters = append(snap.Clusters, ClusterInfo{
+			ID:         stem,
+			Name:       stem,
+			RestConfig: restCfg,
+		})
+		snap.FileHashes[stem] = hash
+	}
+
+	return snap, nil
+}
+
+// isKubeconfigFile checks if a filename has a supported kubeconfig extension.
+func isKubeconfigFile(name string) bool {
+	return strings.HasSuffix(name, ".yaml") ||
+		strings.HasSuffix(name, ".yml") ||
+		strings.HasSuffix(name, ".conf")
+}
+
+// filenameStem strips the kubeconfig file extension to get the cluster ID.
+func filenameStem(name string) string {
+	return strings.TrimSuffix(strings.TrimSuffix(strings.TrimSuffix(name, ".yaml"), ".yml"), ".conf")
 }

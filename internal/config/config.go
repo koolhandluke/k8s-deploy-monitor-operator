@@ -31,9 +31,10 @@ type Config struct {
 	SlackWebhookURL string
 
 	// Tuning
-	WorkerCount     int
-	DebounceSeconds int
-	QueueMaxSize    int
+	WorkerCount          int
+	DebounceSeconds      int
+	QueueMaxSize         int
+	RescanIntervalSeconds int
 
 	// Persistence
 	PersistenceEnabled   bool
@@ -86,6 +87,7 @@ func Load() (*Config, error) {
 	c.WorkerCount = envInt("WORKER_COUNT", 3)
 	c.DebounceSeconds = envInt("DEBOUNCE_SECONDS", 30)
 	c.QueueMaxSize = envInt("QUEUE_MAX_SIZE", 100)
+	c.RescanIntervalSeconds = envInt("RESCAN_INTERVAL_SECONDS", 600)
 
 	// Logging
 	c.Debug = strings.ToLower(os.Getenv("DEBUG")) == "true"

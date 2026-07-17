@@ -86,6 +86,34 @@ The monitor continues watching. Steps 4–8 repeat for every Deployment change. 
 
 On shutdown (SIGTERM/SIGINT), the monitor cancels all informer contexts, stops the debouncer (dropping pending events), and if persistence is enabled, flushes any buffered hash updates to the `ClusterRolloutState` CRD.
 
+### 10. Credential Rotation and Cluster Discovery
+
+When running with `KUBECONFIG_DIR` (e.g., volume-mounted Rancher kubeconfigs), credentials can rotate and new clusters can appear at any time. The monitor runs a periodic reconcile loop to handle this without requiring a restart.
+
+**How it works:**
+
+The Manager re-reads the kubeconfig directory on a configurable interval (`RESCAN_INTERVAL_SECONDS`, default 600, `0` = disabled). Each file is hashed with SHA256 to detect changes efficiently — if a file's content hasn't changed, its watcher is left alone.
+
+On each rescan, three things can happen:
+
+- **New file appeared** — A new kubeconfig file was added to the directory (new cluster onboarded). The manager starts a fresh ClusterWatcher for it. The informer issues an initial LIST to seed the template cache, then transitions to WATCH. No false rollout events are emitted — the new watcher treats the LIST as baseline, same as initial startup.
+
+- **File content changed** — A kubeconfig was updated (token rotation, server URL change, certificate renewal). The manager stops the old ClusterWatcher, creates a new one with the updated `*rest.Config`, and starts it. The new watcher re-LISTs deployments to rebuild its template cache. Because it starts fresh, no stale credentials are used.
+
+- **File removed** — A cluster was decommissioned. The manager stops the watcher and removes it from the map. Any pending debounced events for that cluster are dropped when the debouncer is next cleaned up.
+
+**What doesn't happen:**
+
+If the directory is temporarily unreadable (e.g., during a volume remount), the reconcile logs an error and skips the cycle. Existing watchers continue running undisturbed — the monitor never tears down working watchers because of a transient read failure.
+
+**Configuration:**
+
+| Variable | Default | Description |
+|---|---|---|
+| `RESCAN_INTERVAL_SECONDS` | `600` | How often to re-read `KUBECONFIG_DIR` for changes. `0` disables rescanning. |
+
+This feature only activates when `KUBECONFIG_DIR` is set. Single-kubeconfig mode (`KUBECONFIG`) does not rescan.
+
 ---
 
 ## Core Components
@@ -216,6 +244,7 @@ All configuration is via environment variables:
 | `WORKER_COUNT` | `3` | Number of dispatcher worker goroutines |
 | `DEBOUNCE_SECONDS` | `30` | Debounce window per deployment |
 | `QUEUE_MAX_SIZE` | `100` | Buffered event channel capacity |
+| `RESCAN_INTERVAL_SECONDS` | `600` | How often to re-read `KUBECONFIG_DIR` for changes (`0` = disabled) |
 | `PERSISTENCE_ENABLED` | `false` | Enable CRD-based persistence |
 | `PERSISTENCE_NAMESPACE` | `rollout-monitor` | Namespace where CRDs are stored |
 

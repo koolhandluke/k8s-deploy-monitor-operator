@@ -11,6 +11,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/client-go/dynamic"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -52,15 +53,19 @@ func main() {
 		"persistence", cfg.PersistenceEnabled,
 		"debounce_seconds", cfg.DebounceSeconds,
 		"workers", cfg.WorkerCount,
+		"rescan_interval_seconds", cfg.RescanIntervalSeconds,
 	)
 
 	ctx, cancel := context.WithCancel(context.Background())
+
+	// Create NamespaceFilter seeded from env vars (backwards compatible)
+	nsFilter := watcher.NewNamespaceFilter(cfg.NamespaceAllowlist, cfg.NamespaceDenylist)
 
 	// Set up persistence if enabled
 	var hashStore *persistence.HashStore
 	var recorder *persistence.AuditRecorder
 	if cfg.PersistenceEnabled {
-		c, err := initK8sClient(clusters)
+		c, dynClient, err := initK8sClients(clusters)
 		if err != nil {
 			slog.Error("failed to initialize persistence client", "error", err)
 			os.Exit(1)
@@ -72,6 +77,11 @@ func main() {
 		// Start batched hash flush loop (every 5s with jitter)
 		go hashStore.FlushLoop(ctx, 5*time.Second)
 		slog.Info("persistence enabled", "namespace", cfg.PersistenceNamespace)
+
+		// Start ConfigWatcher for runtime-reloadable namespace filtering
+		configWatcher := watcher.NewConfigWatcher(nsFilter, c, dynClient)
+		go configWatcher.Start(ctx)
+		defer configWatcher.Stop()
 	}
 
 	// Event channel between watchers and dispatcher
@@ -83,14 +93,15 @@ func main() {
 
 	// Start cluster watch manager
 	manager := watcher.NewManager(
-		clusters,
-		cfg.NamespaceAllowed,
+		nsFilter.Allowed,
 		time.Duration(cfg.DebounceSeconds)*time.Second,
 		eventCh,
 		hashStore,
+		cfg.KubeconfigDir,
+		time.Duration(cfg.RescanIntervalSeconds)*time.Second,
 	)
 
-	if err := manager.Start(ctx); err != nil {
+	if err := manager.Start(ctx, clusters); err != nil {
 		slog.Error("failed to start watch manager", "error", err)
 		os.Exit(1)
 	}
@@ -109,16 +120,24 @@ func main() {
 	slog.Info("rollout monitor stopped")
 }
 
-func initK8sClient(clusters []config.ClusterInfo) (client.Client, error) {
-	// Use the first cluster's rest config to connect to the central cluster
-	// (where CRDs live). For local dev this is the same cluster.
+func initK8sClients(clusters []config.ClusterInfo) (client.Client, dynamic.Interface, error) {
 	if len(clusters) == 0 {
-		return nil, fmt.Errorf("no clusters configured")
+		return nil, nil, fmt.Errorf("no clusters configured")
 	}
 
 	scheme := runtime.NewScheme()
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(v1alpha1.AddToScheme(scheme))
 
-	return client.New(clusters[0].RestConfig, client.Options{Scheme: scheme})
+	c, err := client.New(clusters[0].RestConfig, client.Options{Scheme: scheme})
+	if err != nil {
+		return nil, nil, fmt.Errorf("creating controller-runtime client: %w", err)
+	}
+
+	dynClient, err := dynamic.NewForConfig(clusters[0].RestConfig)
+	if err != nil {
+		return nil, nil, fmt.Errorf("creating dynamic client: %w", err)
+	}
+
+	return c, dynClient, nil
 }
