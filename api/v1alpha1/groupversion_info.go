@@ -22,5 +22,7 @@ func init() {
 		&ClusterRolloutStateList{},
 		&RolloutRecord{},
 		&RolloutRecordList{},
+		&MonitorConfig{},
+		&MonitorConfigList{},
 	)
 }

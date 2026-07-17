@@ -19,24 +19,35 @@ No linter or CI config exists in the repo yet.
 ## Architecture
 
 Watches Kubernetes Deployments across one or more clusters, detects rollouts, and dispatches
-notifications. Read-only — never mutates cluster state.
+notifications. Read-only with respect to watched clusters — never mutates Deployments or other
+workload resources. Writes its own CRDs (`ClusterRolloutState`, `RolloutRecord`, `MonitorConfig`)
+for persistence and audit when `PERSISTENCE_ENABLED=true`.
 
 Pipeline, wired together in [cmd/monitor/main.go](cmd/monitor/main.go):
 
 ```
 kubeconfigs → Manager → ClusterWatcher (1 per cluster) → Debouncer → eventCh → Dispatcher → Targets
+                ↕                ↕                                                   ↕
+          reconcileLoop    HashStore (CRD)                                   AuditRecorder (CRD)
+                            ConfigWatcher ← MonitorConfig CRD
 ```
 
 - **[internal/config/](internal/config/)** — env-var config plus cluster loading. Cluster source
   priority: `KUBECONFIG_DIR` (one file per cluster, multi-cluster) > `KUBECONFIG` (single) >
-  default kubeconfig. `Config.NamespaceAllowed` is passed down the stack as a `func(string) bool`.
+  default kubeconfig.
 - **[internal/watcher/](internal/watcher/)** — `Manager` starts one `ClusterWatcher` per cluster,
   staggered 1s apart. Each watcher runs a `SharedInformerFactory` on Deployments with resync
-  disabled.
+  disabled. Also contains `NamespaceFilter` (thread-safe, runtime-updatable allow/deny filter)
+  and `ConfigWatcher` (watches `MonitorConfig` CRD to hot-reload namespace filtering).
 - **[internal/dispatch/](internal/dispatch/)** — `Dispatcher` fans events to `Target`
-  implementations via a worker pool. `LogTarget` is always registered; Holmes and Slack are added
-  based on `DISPATCH_MODE`.
+  implementations via a worker pool. `LogTarget` is always registered; `AuditTarget` is added
+  when persistence is enabled; Holmes and Slack are added based on `DISPATCH_MODE`.
+- **[internal/persistence/](internal/persistence/)** — `HashStore` batches template hash writes to
+  `ClusterRolloutState` CRDs (flush every 5s). `AuditRecorder` writes `RolloutRecord` CRDs for
+  each dispatched event. Both use `controller-runtime` client.
 - **[internal/models/](internal/models/)** — `RolloutEvent`, shared by watcher and dispatch.
+- **[api/v1alpha1/](api/v1alpha1/)** — CRD types: `ClusterRolloutState` (persisted template
+  hashes per cluster), `RolloutRecord` (audit trail), `MonitorConfig` (runtime namespace config).
 
 ### Rollout detection
 
@@ -73,8 +84,15 @@ blocking the watcher. Queue depth is `QUEUE_MAX_SIZE` (default 100).
 | `WORKER_COUNT` | 3 | dispatcher workers |
 | `DEBOUNCE_SECONDS` | 30 | |
 | `QUEUE_MAX_SIZE` | 100 | |
+| `RESCAN_INTERVAL_SECONDS` | 600 | how often to re-read `KUBECONFIG_DIR` for added/changed/removed clusters |
+| `PERSISTENCE_ENABLED` | `false` | enable CRD-based hash persistence and audit recording |
+| `PERSISTENCE_NAMESPACE` | `rollout-monitor` | namespace for `ClusterRolloutState` and `RolloutRecord` CRDs |
+| `DEBUG` | `false` | set to `true` for debug-level logging |
 
 Malformed ints silently fall back to the default rather than erroring.
+
+Namespace filtering can also be configured at runtime via a `MonitorConfig` CRD named `default`
+(requires `PERSISTENCE_ENABLED=true`). CRD values override env vars when present.
 
 ## Conventions
 

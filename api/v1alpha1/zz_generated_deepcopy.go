@@ -198,3 +198,97 @@ func (in *RolloutRecordList) DeepCopyObject() runtime.Object {
 	}
 	return nil
 }
+
+// DeepCopyInto copies all properties into another MonitorConfig.
+func (in *MonitorConfig) DeepCopyInto(out *MonitorConfig) {
+	*out = *in
+	out.TypeMeta = in.TypeMeta
+	in.ObjectMeta.DeepCopyInto(&out.ObjectMeta)
+	in.Spec.DeepCopyInto(&out.Spec)
+	in.Status.DeepCopyInto(&out.Status)
+}
+
+func (in *MonitorConfig) DeepCopy() *MonitorConfig {
+	if in == nil {
+		return nil
+	}
+	out := new(MonitorConfig)
+	in.DeepCopyInto(out)
+	return out
+}
+
+func (in *MonitorConfig) DeepCopyObject() runtime.Object {
+	if c := in.DeepCopy(); c != nil {
+		return c
+	}
+	return nil
+}
+
+func (in *MonitorConfigSpec) DeepCopyInto(out *MonitorConfigSpec) {
+	*out = *in
+	if in.NamespaceAllowlist != nil {
+		in, out := &in.NamespaceAllowlist, &out.NamespaceAllowlist
+		*out = make([]string, len(*in))
+		copy(*out, *in)
+	}
+	if in.NamespaceDenylist != nil {
+		in, out := &in.NamespaceDenylist, &out.NamespaceDenylist
+		*out = make([]string, len(*in))
+		copy(*out, *in)
+	}
+}
+
+func (in *MonitorConfigSpec) DeepCopy() *MonitorConfigSpec {
+	if in == nil {
+		return nil
+	}
+	out := new(MonitorConfigSpec)
+	in.DeepCopyInto(out)
+	return out
+}
+
+func (in *MonitorConfigStatus) DeepCopyInto(out *MonitorConfigStatus) {
+	*out = *in
+	if in.LastApplied != nil {
+		in, out := &in.LastApplied, &out.LastApplied
+		*out = (*in).DeepCopy()
+	}
+}
+
+func (in *MonitorConfigStatus) DeepCopy() *MonitorConfigStatus {
+	if in == nil {
+		return nil
+	}
+	out := new(MonitorConfigStatus)
+	in.DeepCopyInto(out)
+	return out
+}
+
+func (in *MonitorConfigList) DeepCopyInto(out *MonitorConfigList) {
+	*out = *in
+	out.TypeMeta = in.TypeMeta
+	in.ListMeta.DeepCopyInto(&out.ListMeta)
+	if in.Items != nil {
+		in, out := &in.Items, &out.Items
+		*out = make([]MonitorConfig, len(*in))
+		for i := range *in {
+			(*in)[i].DeepCopyInto(&(*out)[i])
+		}
+	}
+}
+
+func (in *MonitorConfigList) DeepCopy() *MonitorConfigList {
+	if in == nil {
+		return nil
+	}
+	out := new(MonitorConfigList)
+	in.DeepCopyInto(out)
+	return out
+}
+
+func (in *MonitorConfigList) DeepCopyObject() runtime.Object {
+	if c := in.DeepCopy(); c != nil {
+		return c
+	}
+	return nil
+}
