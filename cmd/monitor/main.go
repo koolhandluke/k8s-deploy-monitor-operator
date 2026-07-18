@@ -17,6 +17,7 @@ import (
 
 	v1alpha1 "github.com/koolhandluke/k8s-deploy-monitor-operator/api/v1alpha1"
 	"github.com/koolhandluke/k8s-deploy-monitor-operator/internal/config"
+	"github.com/koolhandluke/k8s-deploy-monitor-operator/internal/diagnostic"
 	"github.com/koolhandluke/k8s-deploy-monitor-operator/internal/dispatch"
 	"github.com/koolhandluke/k8s-deploy-monitor-operator/internal/models"
 	"github.com/koolhandluke/k8s-deploy-monitor-operator/internal/persistence"
@@ -51,6 +52,7 @@ func main() {
 		"clusters", len(clusters),
 		"dispatch_mode", cfg.DispatchMode,
 		"persistence", cfg.PersistenceEnabled,
+		"diagnostic", cfg.DiagnosticEnabled,
 		"debounce_seconds", cfg.DebounceSeconds,
 		"workers", cfg.WorkerCount,
 		"rescan_interval_seconds", cfg.RescanIntervalSeconds,
@@ -89,6 +91,17 @@ func main() {
 
 	// Start dispatcher
 	dispatcher := dispatch.NewDispatcher(cfg, eventCh, recorder)
+
+	// Register async diagnostic target if enabled
+	var diagTarget *diagnostic.AsyncDiagnosticTarget
+	if cfg.DiagnosticEnabled {
+		registry := diagnostic.NewClusterRegistry(clusters)
+		analyzer := diagnostic.NewRolloutAnalyzer(registry)
+		diagTarget = diagnostic.NewAsyncDiagnosticTarget(analyzer, cfg.DiagnosticMaxConcurrent)
+		dispatcher.AddTarget(diagTarget)
+		slog.Info("diagnostic target enabled", "max_concurrent", cfg.DiagnosticMaxConcurrent)
+	}
+
 	dispatcher.Start(ctx)
 
 	// Start cluster watch manager
@@ -115,6 +128,9 @@ func main() {
 	manager.Stop()
 	close(eventCh)
 	dispatcher.Wait()
+	if diagTarget != nil {
+		diagTarget.Stop()
+	}
 	cancel()
 
 	slog.Info("rollout monitor stopped")

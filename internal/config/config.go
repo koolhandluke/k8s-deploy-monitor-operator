@@ -40,6 +40,10 @@ type Config struct {
 	PersistenceEnabled   bool
 	PersistenceNamespace string
 
+	// Diagnostic
+	DiagnosticEnabled       bool
+	DiagnosticMaxConcurrent int
+
 	// Logging
 	Debug bool
 }
@@ -88,6 +92,10 @@ func Load() (*Config, error) {
 	c.DebounceSeconds = envInt("DEBOUNCE_SECONDS", 30)
 	c.QueueMaxSize = envInt("QUEUE_MAX_SIZE", 100)
 	c.RescanIntervalSeconds = envInt("RESCAN_INTERVAL_SECONDS", 600)
+
+	// Diagnostic
+	c.DiagnosticEnabled = strings.ToLower(os.Getenv("DIAGNOSTIC_ENABLED")) == "true"
+	c.DiagnosticMaxConcurrent = envInt("DIAGNOSTIC_MAX_CONCURRENT", 10)
 
 	// Logging
 	c.Debug = strings.ToLower(os.Getenv("DEBUG")) == "true"

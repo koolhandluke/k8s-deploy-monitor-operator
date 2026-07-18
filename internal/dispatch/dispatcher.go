@@ -56,6 +56,11 @@ func NewDispatcher(cfg *config.Config, eventCh chan models.RolloutEvent, recorde
 	return d
 }
 
+// AddTarget registers an additional dispatch target. Must be called before Start.
+func (d *Dispatcher) AddTarget(t Target) {
+	d.targets = append(d.targets, t)
+}
+
 // Start launches worker goroutines that consume events until the event channel is closed.
 func (d *Dispatcher) Start(ctx context.Context) {
 	for i := 0; i < d.workers; i++ {
