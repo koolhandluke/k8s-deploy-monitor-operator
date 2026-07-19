@@ -96,6 +96,7 @@ type RolloutPhase string
 
 const (
 	PhaseDetected     RolloutPhase = "Detected"
+	PhaseProcessing   RolloutPhase = "Processing"
 	PhaseDispatched   RolloutPhase = "Dispatched"
 	PhaseInvestigated RolloutPhase = "Investigated"
 	PhaseFailed       RolloutPhase = "Failed"
@@ -103,7 +104,7 @@ const (
 
 type RolloutRecordStatus struct {
 	// Phase of the rollout processing.
-	// +kubebuilder:validation:Enum=Detected;Dispatched;Investigated;Failed
+	// +kubebuilder:validation:Enum=Detected;Processing;Dispatched;Investigated;Failed
 	Phase RolloutPhase `json:"phase,omitempty"`
 
 	// DispatchedAt is when the event was dispatched.

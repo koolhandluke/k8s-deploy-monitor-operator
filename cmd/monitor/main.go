@@ -86,23 +86,41 @@ func main() {
 		defer configWatcher.Stop()
 	}
 
-	// Event channel between watchers and dispatcher
+	// Event channel between watchers and dispatcher/recorder
 	eventCh := make(chan models.RolloutEvent, cfg.QueueMaxSize)
 
-	// Start dispatcher
-	dispatcher := dispatch.NewDispatcher(cfg, eventCh, recorder)
-
-	// Register async diagnostic target if enabled
+	var dispatcher *dispatch.Dispatcher
 	var diagTarget *diagnostic.AsyncDiagnosticTarget
-	if cfg.DiagnosticEnabled {
-		registry := diagnostic.NewClusterRegistry(clusters)
-		analyzer := diagnostic.NewRolloutAnalyzer(registry)
-		diagTarget = diagnostic.NewAsyncDiagnosticTarget(analyzer, cfg.DiagnosticMaxConcurrent)
-		dispatcher.AddTarget(diagTarget)
-		slog.Info("diagnostic target enabled", "max_concurrent", cfg.DiagnosticMaxConcurrent)
-	}
 
-	dispatcher.Start(ctx)
+	if cfg.DispatcherSplit {
+		// Split mode: monitor only writes CRDs, dispatcher service handles dispatch
+		if recorder == nil {
+			slog.Error("DISPATCHER_SPLIT=true requires PERSISTENCE_ENABLED=true")
+			os.Exit(1)
+		}
+		go func() {
+			for event := range eventCh {
+				if err := recorder.RecordRollout(ctx, event); err != nil {
+					slog.Error("failed to write rollout record", "error", err)
+				}
+			}
+		}()
+		slog.Info("running in split mode: writing CRDs only, no local dispatch")
+	} else {
+		// Combined mode: monitor dispatches events directly (original behavior)
+		dispatcher = dispatch.NewDispatcher(cfg, eventCh, recorder)
+
+		// Register async diagnostic target if enabled
+		if cfg.DiagnosticEnabled {
+			registry := diagnostic.NewClusterRegistry(clusters)
+			analyzer := diagnostic.NewRolloutAnalyzer(registry)
+			diagTarget = diagnostic.NewAsyncDiagnosticTarget(analyzer, cfg.DiagnosticMaxConcurrent)
+			dispatcher.AddTarget(diagTarget)
+			slog.Info("diagnostic target enabled", "max_concurrent", cfg.DiagnosticMaxConcurrent)
+		}
+
+		dispatcher.Start(ctx)
+	}
 
 	// Start cluster watch manager
 	manager := watcher.NewManager(
@@ -127,7 +145,9 @@ func main() {
 	slog.Info("shutdown signal received", "signal", sig)
 	manager.Stop()
 	close(eventCh)
-	dispatcher.Wait()
+	if dispatcher != nil {
+		dispatcher.Wait()
+	}
 	if diagTarget != nil {
 		diagTarget.Stop()
 	}

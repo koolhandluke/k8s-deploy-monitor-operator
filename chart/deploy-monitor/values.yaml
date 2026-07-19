@@ -38,3 +38,15 @@ serviceAccount:
 
 namespace:
   create: false
+
+dispatcher:
+  enabled: false   # opt-in, existing users unaffected
+  replicas: 1
+  ttlDays: 7
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi

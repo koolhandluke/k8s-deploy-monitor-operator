@@ -39,6 +39,10 @@ type Config struct {
 	// Persistence
 	PersistenceEnabled   bool
 	PersistenceNamespace string
+	RolloutRecordTTLDays int
+
+	// Split mode: when true, monitor only writes CRDs; dispatcher service handles dispatch
+	DispatcherSplit bool
 
 	// Diagnostic
 	DiagnosticEnabled       bool
@@ -106,6 +110,8 @@ func Load() (*Config, error) {
 	if c.PersistenceEnabled && c.PersistenceNamespace == "" {
 		c.PersistenceNamespace = "rollout-monitor"
 	}
+	c.RolloutRecordTTLDays = envInt("ROLLOUT_RECORD_TTL_DAYS", 7)
+	c.DispatcherSplit = strings.ToLower(os.Getenv("DISPATCHER_SPLIT")) == "true"
 
 	return c, nil
 }

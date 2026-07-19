@@ -46,8 +46,8 @@ func TestHolmesTarget_Dispatch(t *testing.T) {
 		t.Fatalf("dispatch failed: %v", err)
 	}
 
-	if receivedBody.Query == "" {
-		t.Fatal("expected non-empty query")
+	if receivedBody.Ask == "" {
+		t.Fatal("expected non-empty ask")
 	}
 }
 

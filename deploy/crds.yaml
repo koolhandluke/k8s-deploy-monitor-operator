@@ -105,7 +105,7 @@ spec:
               properties:
                 phase:
                   type: string
-                  enum: ["Detected", "Dispatched", "Investigated", "Failed"]
+                  enum: ["Detected", "Processing", "Dispatched", "Investigated", "Failed"]
                 dispatchedAt:
                   type: string
                   format: date-time

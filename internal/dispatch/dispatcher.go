@@ -56,6 +56,29 @@ func NewDispatcher(cfg *config.Config, eventCh chan models.RolloutEvent, recorde
 	return d
 }
 
+// NewStandaloneDispatcher creates a dispatcher without a channel or workers.
+// Events are processed synchronously via DispatchEvent(). Used by the dispatcher service.
+func NewStandaloneDispatcher(cfg *config.Config) *Dispatcher {
+	d := &Dispatcher{
+		workers: cfg.WorkerCount,
+	}
+
+	// Always log
+	d.targets = append(d.targets, &LogTarget{})
+
+	// Holmes
+	if cfg.DispatchMode == config.DispatchHolmes || cfg.DispatchMode == config.DispatchBoth {
+		d.targets = append(d.targets, NewHolmesTarget(cfg.HolmesAPIURL, &http.Client{Timeout: 5 * time.Minute}))
+	}
+
+	// Slack
+	if cfg.DispatchMode == config.DispatchSlack || cfg.DispatchMode == config.DispatchBoth {
+		d.targets = append(d.targets, NewSlackTarget(cfg.SlackWebhookURL, &http.Client{Timeout: 10 * time.Second}))
+	}
+
+	return d
+}
+
 // AddTarget registers an additional dispatch target. Must be called before Start.
 func (d *Dispatcher) AddTarget(t Target) {
 	d.targets = append(d.targets, t)
@@ -80,6 +103,26 @@ func (d *Dispatcher) Wait() {
 	slog.Info("all dispatcher workers stopped")
 }
 
+// DispatchEvent dispatches a single event to all configured targets.
+// Returns the list of targets that succeeded and any error string from failed targets.
+func (d *Dispatcher) DispatchEvent(ctx context.Context, event models.RolloutEvent) (targets []string, dispatchErr string) {
+	targetNames := make([]string, 0, len(d.targets))
+	for _, t := range d.targets {
+		if err := t.Dispatch(ctx, event); err != nil {
+			slog.Error("dispatch failed",
+				"target", t.Name(),
+				"cluster", event.ClusterName,
+				"deployment", event.Namespace+"/"+event.DeploymentName,
+				"error", err,
+			)
+			dispatchErr = err.Error()
+		} else {
+			targetNames = append(targetNames, t.Name())
+		}
+	}
+	return targetNames, dispatchErr
+}
+
 func (d *Dispatcher) worker(ctx context.Context, id int) {
 	for {
 		select {
@@ -90,22 +133,7 @@ func (d *Dispatcher) worker(ctx context.Context, id int) {
 				return
 			}
 
-			// Dispatch to all targets
-			var dispatchErr string
-			targetNames := make([]string, 0, len(d.targets))
-			for _, t := range d.targets {
-				if err := t.Dispatch(ctx, event); err != nil {
-					slog.Error("dispatch failed",
-						"target", t.Name(),
-						"cluster", event.ClusterName,
-						"deployment", event.Namespace+"/"+event.DeploymentName,
-						"error", err,
-					)
-					dispatchErr = err.Error()
-				} else {
-					targetNames = append(targetNames, t.Name())
-				}
-			}
+			targetNames, dispatchErr := d.DispatchEvent(ctx, event)
 
 			// Update record status after dispatch
 			if d.recorder != nil {

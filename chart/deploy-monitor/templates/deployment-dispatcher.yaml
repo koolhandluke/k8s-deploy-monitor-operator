@@ -1,27 +1,31 @@
+{{- if .Values.dispatcher.enabled }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "deploy-monitor.fullname" . }}
+  name: {{ include "deploy-monitor.fullname" . }}-dispatcher
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "deploy-monitor.labels" . | nindent 4 }}
+    app.kubernetes.io/component: dispatcher
 spec:
-  replicas: 1
+  replicas: {{ .Values.dispatcher.replicas }}
   selector:
     matchLabels:
       {{- include "deploy-monitor.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: dispatcher
   template:
     metadata:
       labels:
         {{- include "deploy-monitor.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: dispatcher
     spec:
-      serviceAccountName: {{ include "deploy-monitor.serviceAccountName" . }}
+      serviceAccountName: {{ include "deploy-monitor.fullname" . }}-dispatcher
       containers:
-        - name: monitor
+        - name: dispatcher
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["rollout-dispatcher"]
           env:
-            {{- if not .Values.dispatcher.enabled }}
             - name: DISPATCH_MODE
               value: {{ .Values.dispatch.mode | quote }}
             {{- if .Values.dispatch.holmesApiUrl }}
@@ -34,27 +38,10 @@ spec:
             {{- end }}
             - name: WORKER_COUNT
               value: {{ .Values.tuning.workerCount | quote }}
-            {{- else }}
-            - name: DISPATCHER_SPLIT
-              value: "true"
-            {{- end }}
-            {{- if .Values.namespaceFilter.allowlist }}
-            - name: NAMESPACE_ALLOWLIST
-              value: {{ join "," .Values.namespaceFilter.allowlist | quote }}
-            {{- end }}
-            {{- if .Values.namespaceFilter.denylist }}
-            - name: NAMESPACE_DENYLIST
-              value: {{ join "," .Values.namespaceFilter.denylist | quote }}
-            {{- end }}
-            - name: DEBOUNCE_SECONDS
-              value: {{ .Values.tuning.debounceSeconds | quote }}
-            - name: QUEUE_MAX_SIZE
-              value: {{ .Values.tuning.queueMaxSize | quote }}
-            {{- if .Values.persistence.enabled }}
-            - name: PERSISTENCE_ENABLED
-              value: "true"
             - name: PERSISTENCE_NAMESPACE
               value: {{ default .Release.Namespace .Values.persistence.namespace | quote }}
-            {{- end }}
+            - name: ROLLOUT_RECORD_TTL_DAYS
+              value: {{ .Values.dispatcher.ttlDays | quote }}
           resources:
-            {{- toYaml .Values.resources | nindent 12 }}
+            {{- toYaml .Values.dispatcher.resources | nindent 12 }}
+{{- end }}

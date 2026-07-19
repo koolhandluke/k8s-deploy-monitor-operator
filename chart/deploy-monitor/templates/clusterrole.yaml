@@ -16,9 +16,19 @@ rules:
     verbs: ["get", "update", "patch"]
   {{- if .Values.persistence.enabled }}
   - apiGroups: ["deploy-monitor.io"]
-    resources: ["clusterrolloutstates", "rolloutrecords"]
+    resources: ["clusterrolloutstates"]
     verbs: ["get", "list", "create", "update", "patch"]
   - apiGroups: ["deploy-monitor.io"]
-    resources: ["clusterrolloutstates/status", "rolloutrecords/status"]
+    resources: ["clusterrolloutstates/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["deploy-monitor.io"]
+    resources: ["rolloutrecords"]
+    {{- if .Values.dispatcher.enabled }}
+    verbs: ["create"]
+    {{- else }}
+    verbs: ["get", "list", "create", "update", "patch"]
+    {{- end }}
+  - apiGroups: ["deploy-monitor.io"]
+    resources: ["rolloutrecords/status"]
     verbs: ["get", "update", "patch"]
   {{- end }}
