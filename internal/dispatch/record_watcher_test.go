@@ -6,7 +6,6 @@ import (
 	"time"
 
 	v1alpha1 "github.com/koolhandluke/k8s-deploy-monitor-operator/api/v1alpha1"
-	"github.com/koolhandluke/k8s-deploy-monitor-operator/internal/config"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -58,8 +57,7 @@ func makeRecord(name, namespace string, phase v1alpha1.RolloutPhase, createdAt t
 
 func TestRecordWatcher_HandleRecord_SkipsNonDetected(t *testing.T) {
 	dynClient := newFakeDynClient()
-	cfg := &config.Config{DispatchMode: config.DispatchLog, WorkerCount: 1}
-	dispatcher := NewStandaloneDispatcher(cfg)
+	dispatcher := NewStandaloneDispatcher([]Target{&LogTarget{}})
 
 	rw := NewRecordWatcher(dynClient, nil, dispatcher, "rollout-monitor")
 
@@ -72,8 +70,7 @@ func TestRecordWatcher_HandleRecord_SkipsNonDetected(t *testing.T) {
 
 func TestRecordWatcher_ToRolloutEvent(t *testing.T) {
 	dynClient := newFakeDynClient()
-	cfg := &config.Config{DispatchMode: config.DispatchLog, WorkerCount: 1}
-	dispatcher := NewStandaloneDispatcher(cfg)
+	dispatcher := NewStandaloneDispatcher([]Target{&LogTarget{}})
 
 	rw := NewRecordWatcher(dynClient, nil, dispatcher, "rollout-monitor")
 
@@ -110,8 +107,7 @@ func TestRecordWatcher_ToRolloutEvent(t *testing.T) {
 func TestRecordWatcher_ClaimRecord_Success(t *testing.T) {
 	record := makeRecord("test-1", "rollout-monitor", v1alpha1.PhaseDetected, time.Now())
 	dynClient := newFakeDynClient(record)
-	cfg := &config.Config{DispatchMode: config.DispatchLog, WorkerCount: 1}
-	dispatcher := NewStandaloneDispatcher(cfg)
+	dispatcher := NewStandaloneDispatcher([]Target{&LogTarget{}})
 
 	rw := NewRecordWatcher(dynClient, nil, dispatcher, "rollout-monitor")
 

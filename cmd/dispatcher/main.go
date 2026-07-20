@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -55,8 +57,19 @@ func main() {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
+	// Build targets inline
+	targets := []dispatch.Target{&dispatch.LogTarget{}}
+
+	if cfg.DispatchMode == config.DispatchHolmes || cfg.DispatchMode == config.DispatchBoth {
+		targets = append(targets, dispatch.NewHolmesTarget(cfg.HolmesAPIURL, &http.Client{Timeout: 5 * time.Minute}))
+	}
+
+	if cfg.DispatchMode == config.DispatchSlack || cfg.DispatchMode == config.DispatchBoth {
+		targets = append(targets, dispatch.NewSlackTarget(cfg.SlackWebhookURL, &http.Client{Timeout: 10 * time.Second}))
+	}
+
 	// Create standalone dispatcher (no channel, synchronous dispatch)
-	dispatcher := dispatch.NewStandaloneDispatcher(cfg)
+	dispatcher := dispatch.NewStandaloneDispatcher(targets)
 
 	// Create record watcher
 	namespace := cfg.PersistenceNamespace

@@ -3,14 +3,9 @@ package dispatch
 import (
 	"context"
 	"log/slog"
-	"net/http"
 	"sync"
-	"time"
 
-	v1alpha1 "github.com/koolhandluke/k8s-deploy-monitor-operator/api/v1alpha1"
-	"github.com/koolhandluke/k8s-deploy-monitor-operator/internal/config"
 	"github.com/koolhandluke/k8s-deploy-monitor-operator/internal/models"
-	"github.com/koolhandluke/k8s-deploy-monitor-operator/internal/persistence"
 )
 
 // Target is something that can handle a rollout event.
@@ -21,67 +16,33 @@ type Target interface {
 
 // Dispatcher consumes rollout events from a channel and dispatches to configured targets.
 type Dispatcher struct {
-	eventCh  chan models.RolloutEvent
-	targets  []Target
-	workers  int
-	recorder *persistence.AuditRecorder // nil if persistence disabled
-	wg       sync.WaitGroup
+	eventCh      chan models.RolloutEvent
+	targets      []Target
+	workers      int
+	onDispatched func(context.Context, models.RolloutEvent, []string, string)
+	wg           sync.WaitGroup
 }
 
-func NewDispatcher(cfg *config.Config, eventCh chan models.RolloutEvent, recorder *persistence.AuditRecorder) *Dispatcher {
-	d := &Dispatcher{
-		eventCh:  eventCh,
-		workers:  cfg.WorkerCount,
-		recorder: recorder,
+func NewDispatcher(targets []Target, eventCh chan models.RolloutEvent, workerCount int) *Dispatcher {
+	return &Dispatcher{
+		eventCh: eventCh,
+		targets: targets,
+		workers: workerCount,
 	}
-
-	// Always log
-	d.targets = append(d.targets, &LogTarget{})
-
-	// Audit persistence
-	if recorder != nil {
-		d.targets = append(d.targets, NewAuditTarget(recorder))
-	}
-
-	// Holmes
-	if cfg.DispatchMode == config.DispatchHolmes || cfg.DispatchMode == config.DispatchBoth {
-		d.targets = append(d.targets, NewHolmesTarget(cfg.HolmesAPIURL, &http.Client{Timeout: 5 * time.Minute}))
-	}
-
-	// Slack
-	if cfg.DispatchMode == config.DispatchSlack || cfg.DispatchMode == config.DispatchBoth {
-		d.targets = append(d.targets, NewSlackTarget(cfg.SlackWebhookURL, &http.Client{Timeout: 10 * time.Second}))
-	}
-
-	return d
 }
 
 // NewStandaloneDispatcher creates a dispatcher without a channel or workers.
 // Events are processed synchronously via DispatchEvent(). Used by the dispatcher service.
-func NewStandaloneDispatcher(cfg *config.Config) *Dispatcher {
-	d := &Dispatcher{
-		workers: cfg.WorkerCount,
+func NewStandaloneDispatcher(targets []Target) *Dispatcher {
+	return &Dispatcher{
+		targets: targets,
 	}
-
-	// Always log
-	d.targets = append(d.targets, &LogTarget{})
-
-	// Holmes
-	if cfg.DispatchMode == config.DispatchHolmes || cfg.DispatchMode == config.DispatchBoth {
-		d.targets = append(d.targets, NewHolmesTarget(cfg.HolmesAPIURL, &http.Client{Timeout: 5 * time.Minute}))
-	}
-
-	// Slack
-	if cfg.DispatchMode == config.DispatchSlack || cfg.DispatchMode == config.DispatchBoth {
-		d.targets = append(d.targets, NewSlackTarget(cfg.SlackWebhookURL, &http.Client{Timeout: 10 * time.Second}))
-	}
-
-	return d
 }
 
-// AddTarget registers an additional dispatch target. Must be called before Start.
-func (d *Dispatcher) AddTarget(t Target) {
-	d.targets = append(d.targets, t)
+// SetOnDispatched registers a callback invoked after each event is dispatched.
+// The callback receives the context, event, list of successful target names, and any error string.
+func (d *Dispatcher) SetOnDispatched(fn func(context.Context, models.RolloutEvent, []string, string)) {
+	d.onDispatched = fn
 }
 
 // Start launches worker goroutines that consume events until the event channel is closed.
@@ -135,13 +96,8 @@ func (d *Dispatcher) worker(ctx context.Context, id int) {
 
 			targetNames, dispatchErr := d.DispatchEvent(ctx, event)
 
-			// Update record status after dispatch
-			if d.recorder != nil {
-				phase := v1alpha1.PhaseDispatched
-				if dispatchErr != "" {
-					phase = v1alpha1.PhaseFailed
-				}
-				d.recorder.UpdateRecordStatus(ctx, event, phase, targetNames, dispatchErr)
+			if d.onDispatched != nil {
+				d.onDispatched(ctx, event, targetNames, dispatchErr)
 			}
 		}
 	}

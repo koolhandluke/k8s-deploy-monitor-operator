@@ -112,7 +112,20 @@ func main() {
 		slog.Info("running in split mode: writing CRDs only, no local dispatch")
 	} else {
 		// Combined mode: monitor dispatches events directly (original behavior)
-		dispatcher = dispatch.NewDispatcher(cfg, eventCh, recorder)
+		// Build targets inline
+		targets := []dispatch.Target{&dispatch.LogTarget{}}
+
+		if recorder != nil {
+			targets = append(targets, dispatch.NewAuditTarget(recorder))
+		}
+
+		if cfg.DispatchMode == config.DispatchHolmes || cfg.DispatchMode == config.DispatchBoth {
+			targets = append(targets, dispatch.NewHolmesTarget(cfg.HolmesAPIURL, &http.Client{Timeout: 5 * time.Minute}))
+		}
+
+		if cfg.DispatchMode == config.DispatchSlack || cfg.DispatchMode == config.DispatchBoth {
+			targets = append(targets, dispatch.NewSlackTarget(cfg.SlackWebhookURL, &http.Client{Timeout: 10 * time.Second}))
+		}
 
 		// Register investigation orchestrator if configured
 		if cfg.InvestigationMode != config.InvestigationNone {
@@ -135,7 +148,7 @@ func main() {
 			}
 
 			orchestrator = investigation.NewOrchestrator(investigator, slackReporter, cfg.InvestigationMaxConcurrent)
-			dispatcher.AddTarget(investigation.NewInvestigationTarget(orchestrator))
+			targets = append(targets, investigation.NewInvestigationTarget(orchestrator))
 			slog.Info("investigation mode enabled",
 				"mode", cfg.InvestigationMode,
 				"max_concurrent", cfg.InvestigationMaxConcurrent,
@@ -145,8 +158,21 @@ func main() {
 			registry := diagnostic.NewClusterRegistry(clusters)
 			analyzer := diagnostic.NewRolloutAnalyzer(registry, diagnostic.DefaultAnalyzerConfig())
 			diagTarget = diagnostic.NewAsyncDiagnosticTarget(analyzer, cfg.DiagnosticMaxConcurrent)
-			dispatcher.AddTarget(diagTarget)
+			targets = append(targets, diagTarget)
 			slog.Info("diagnostic target enabled (legacy)", "max_concurrent", cfg.DiagnosticMaxConcurrent)
+		}
+
+		dispatcher = dispatch.NewDispatcher(targets, eventCh, cfg.WorkerCount)
+
+		// Wire persistence callback for post-dispatch status updates
+		if recorder != nil {
+			dispatcher.SetOnDispatched(func(ctx context.Context, event models.RolloutEvent, targetNames []string, dispatchErr string) {
+				phase := v1alpha1.PhaseDispatched
+				if dispatchErr != "" {
+					phase = v1alpha1.PhaseFailed
+				}
+				recorder.UpdateRecordStatus(ctx, event, phase, targetNames, dispatchErr)
+			})
 		}
 
 		dispatcher.Start(ctx)
