@@ -13,6 +13,7 @@ import (
 
 	"github.com/koolhandluke/k8s-deploy-monitor-operator/internal/diagnostic"
 	"github.com/koolhandluke/k8s-deploy-monitor-operator/internal/models"
+	"github.com/koolhandluke/k8s-deploy-monitor-operator/internal/trace"
 )
 
 // HolmesInvestigator calls the Holmes API and maps the response to a DiagnosticReport.
@@ -55,6 +56,12 @@ func (h *HolmesInvestigator) Investigate(ctx context.Context, event models.Rollo
 	body, _ := json.Marshal(holmesChatRequest{Ask: query})
 	url := h.apiURL + "/api/chat"
 
+	slog.Log(ctx, trace.LevelTrace, "holmes outgoing query",
+		"url", url,
+		"query", query,
+		"body_bytes", len(body),
+	)
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("creating holmes request: %w", err)
@@ -65,6 +72,7 @@ func (h *HolmesInvestigator) Investigate(ctx context.Context, event models.Rollo
 	if err != nil {
 		// Retry once after 10s
 		slog.Warn("holmes investigation failed, retrying in 10s", "error", err)
+		slog.Log(ctx, trace.LevelTrace, "holmes retry attempt", "attempt", 2)
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
@@ -79,6 +87,10 @@ func (h *HolmesInvestigator) Investigate(ctx context.Context, event models.Rollo
 		}
 	}
 	defer resp.Body.Close()
+
+	slog.Log(ctx, trace.LevelTrace, "holmes response received",
+		"status_code", resp.StatusCode,
+	)
 
 	if resp.StatusCode >= 400 {
 		return nil, fmt.Errorf("holmes API returned %d", resp.StatusCode)
@@ -95,6 +107,10 @@ func (h *HolmesInvestigator) Investigate(ctx context.Context, event models.Rollo
 		chatResp.Analysis = string(respBody)
 	}
 
+	slog.Log(ctx, trace.LevelTrace, "holmes response body",
+		"body_bytes", len(respBody),
+	)
+
 	// Map Holmes response to DiagnosticReport
 	result := diagnostic.ResultSuccess
 	if strings.Contains(strings.ToLower(chatResp.Analysis), "fail") ||
@@ -102,6 +118,10 @@ func (h *HolmesInvestigator) Investigate(ctx context.Context, event models.Rollo
 		strings.Contains(strings.ToLower(chatResp.Analysis), "crash") {
 		result = diagnostic.ResultFailed
 	}
+
+	slog.Log(ctx, trace.LevelTrace, "holmes result classification",
+		"result", string(result),
+	)
 
 	return &diagnostic.DiagnosticReport{
 		Event:         event,

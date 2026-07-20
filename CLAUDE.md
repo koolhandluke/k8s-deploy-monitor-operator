@@ -88,6 +88,7 @@ blocking the watcher. Queue depth is `QUEUE_MAX_SIZE` (default 100).
 | `PERSISTENCE_ENABLED` | `false` | enable CRD-based hash persistence and audit recording |
 | `PERSISTENCE_NAMESPACE` | `rollout-monitor` | namespace for `ClusterRolloutState` and `RolloutRecord` CRDs |
 | `DEBUG` | `false` | set to `true` for debug-level logging |
+| `TRACE` | `false` | set to `true` for trace-level logging (investigation pipeline detail) |
 
 Malformed ints silently fall back to the default rather than erroring.
 

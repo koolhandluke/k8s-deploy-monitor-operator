@@ -227,6 +227,24 @@ A pool of worker goroutines (default 3) consumes events from a buffered channel 
 - **Holmes** — POST to Holmes API with a natural-language query describing the rollout, so Holmes can investigate autonomously
 - **Slack** — POST to a webhook with a formatted notification
 
+### Event Payload Size
+
+A `RolloutEvent` is a lightweight struct — all string fields, one string-slice pair, and a timestamp:
+
+| Field | Typical size |
+|---|---|
+| `ClusterID` | 20–40 bytes |
+| `ClusterName` | 20–40 bytes |
+| `Namespace` | 10–30 bytes |
+| `DeploymentName` | 15–50 bytes |
+| `OldTemplateHash` / `NewTemplateHash` | 64 bytes each (SHA256 hex) |
+| `OldImages` / `NewImages` | 60–120 bytes each (1–2 container image refs) |
+| `Timestamp` | 24 bytes (RFC3339) |
+
+**In-memory size: ~350–550 bytes per event.** When serialized to JSON for Slack/Holmes dispatch or `RolloutRecord` CRDs, field name overhead brings it to roughly **0.5–0.8 KB**. Even with long registry paths and multiple containers, a single event is unlikely to exceed 1.5 KB.
+
+At the default queue depth of 100, a completely full event channel holds ~50–80 KB — negligible relative to the informer store memory.
+
 ### Namespace Filtering
 
 Namespaces are filtered at the watcher level before any processing. Two modes:
@@ -307,6 +325,7 @@ All configuration is via environment variables:
 | `RESCAN_INTERVAL_SECONDS` | `600` | How often to re-read `KUBECONFIG_DIR` for changes (`0` = disabled) |
 | `PERSISTENCE_ENABLED` | `false` | Enable CRD-based persistence |
 | `PERSISTENCE_NAMESPACE` | `rollout-monitor` | Namespace where CRDs are stored |
+| `TRACE` | `false` | Trace-level logging for investigation pipeline internals |
 
 ## Project Layout
 

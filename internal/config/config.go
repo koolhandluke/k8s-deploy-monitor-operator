@@ -76,6 +76,7 @@ type Config struct {
 
 	// Logging
 	Debug bool
+	Trace bool
 }
 
 // Load reads environment variables and returns a validated Config.
@@ -168,6 +169,7 @@ func Load() (*Config, error) {
 
 	// Logging
 	c.Debug = strings.ToLower(os.Getenv("DEBUG")) == "true"
+	c.Trace = strings.ToLower(os.Getenv("TRACE")) == "true"
 
 	// Persistence
 	c.PersistenceEnabled = strings.ToLower(os.Getenv("PERSISTENCE_ENABLED")) == "true"

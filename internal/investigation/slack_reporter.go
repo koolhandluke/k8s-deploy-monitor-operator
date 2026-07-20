@@ -8,8 +8,10 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/koolhandluke/k8s-deploy-monitor-operator/internal/diagnostic"
+	"github.com/koolhandluke/k8s-deploy-monitor-operator/internal/trace"
 )
 
 // maxLogChars is the maximum number of characters to include from container logs in a Slack message.
@@ -33,15 +35,39 @@ func NewSlackReporter(webhookURL string, client *http.Client) *SlackReporter {
 func (s *SlackReporter) PostReport(ctx context.Context, report *diagnostic.DiagnosticReport) error {
 	var payload map[string]interface{}
 
+	payloadType := "success"
 	if report.Result == diagnostic.ResultSuccess {
 		payload = s.successMessage(report)
 	} else {
+		payloadType = "failure"
 		payload = s.failureMessage(report)
 	}
 
-	body, err := json.Marshal(payload)
+	body, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshaling slack payload: %w", err)
+	}
+
+	blockCount := 0
+	if blocks, ok := payload["blocks"].([]interface{}); ok {
+		blockCount = len(blocks)
+	}
+	slog.Log(ctx, trace.LevelTrace, "slack report payload constructed",
+		"deployment", report.Event.DeploymentKey(),
+		"payload_type", payloadType,
+		"payload_bytes", len(body),
+		"block_count", blockCount,
+	)
+
+	// Test mode: dump payload to stdout instead of posting
+	if s.webhookURL == "TEST" {
+		fmt.Printf("{\"time\":%q,\"level\":\"INFO\",\"msg\":\"investigation report (test mode)\",\"deployment\":%q,\"result\":%q,\"payload\":%s}\n",
+			time.Now().UTC().Format(time.RFC3339Nano),
+			report.Event.DeploymentKey(),
+			string(report.Result),
+			body,
+		)
+		return nil
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.webhookURL, bytes.NewReader(body))

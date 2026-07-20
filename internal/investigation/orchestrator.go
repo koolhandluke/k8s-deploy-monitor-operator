@@ -7,6 +7,7 @@ import (
 
 	"github.com/koolhandluke/k8s-deploy-monitor-operator/internal/diagnostic"
 	"github.com/koolhandluke/k8s-deploy-monitor-operator/internal/models"
+	"github.com/koolhandluke/k8s-deploy-monitor-operator/internal/trace"
 )
 
 // Reporter posts investigation results to an external system (e.g. Slack).
@@ -48,6 +49,13 @@ func NewOrchestrator(investigator Investigator, reporter Reporter, maxConcurrent
 func (o *Orchestrator) Investigate(event models.RolloutEvent) {
 	key := event.DeploymentKey()
 
+	slog.Log(context.Background(), trace.LevelTrace, "investigate called",
+		"deployment", key,
+		"active_count", len(o.active),
+		"semaphore_used", len(o.semaphore),
+		"semaphore_cap", cap(o.semaphore),
+	)
+
 	// Supersede: cancel any in-flight investigation for this deployment
 	o.mu.Lock()
 	if cancelFn, ok := o.active[key]; ok {
@@ -78,6 +86,10 @@ func (o *Orchestrator) Investigate(event models.RolloutEvent) {
 
 	o.mu.Lock()
 	o.active[key] = invCancel
+	slog.Log(context.Background(), trace.LevelTrace, "investigation registered in active map",
+		"deployment", key,
+		"active_count", len(o.active),
+	)
 	o.mu.Unlock()
 
 	o.wg.Add(1)
@@ -94,6 +106,10 @@ func (o *Orchestrator) Investigate(event models.RolloutEvent) {
 			if _, ok := o.active[key]; ok {
 				delete(o.active, key)
 			}
+			slog.Log(context.Background(), trace.LevelTrace, "investigation cleaned up from active map",
+				"deployment", key,
+				"active_count", len(o.active),
+			)
 			o.mu.Unlock()
 			invCancel()
 		}()

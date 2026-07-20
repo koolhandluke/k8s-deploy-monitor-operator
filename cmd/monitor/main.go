@@ -26,6 +26,7 @@ import (
 	"github.com/koolhandluke/k8s-deploy-monitor-operator/internal/investigation"
 	"github.com/koolhandluke/k8s-deploy-monitor-operator/internal/models"
 	"github.com/koolhandluke/k8s-deploy-monitor-operator/internal/persistence"
+	"github.com/koolhandluke/k8s-deploy-monitor-operator/internal/trace"
 	"github.com/koolhandluke/k8s-deploy-monitor-operator/internal/watcher"
 )
 
@@ -41,6 +42,9 @@ func main() {
 	logLevel := slog.LevelInfo
 	if cfg.Debug {
 		logLevel = slog.LevelDebug
+	}
+	if cfg.Trace {
+		logLevel = trace.LevelTrace
 	}
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel})))
 

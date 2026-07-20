@@ -18,6 +18,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/koolhandluke/k8s-deploy-monitor-operator/internal/models"
+	"github.com/koolhandluke/k8s-deploy-monitor-operator/internal/trace"
 )
 
 // AnalyzerConfig holds tunable parameters for the rollout analyzer.
@@ -155,12 +156,20 @@ func (a *RolloutAnalyzer) monitorRollout(ctx context.Context, clientset kubernet
 
 		// Step 1: Gate on generation match
 		if deploy.Status.ObservedGeneration < deploy.Generation {
+			slog.Log(ctx, trace.LevelTrace, "generation mismatch, waiting for controller",
+				"deployment", event.DeploymentKey(),
+				"generation", deploy.Generation,
+				"observed_generation", deploy.Status.ObservedGeneration,
+			)
 			progress.lastProgressAt = now // controller hasn't caught up yet, not stalled
 			continue
 		}
 
 		// Step 2a: Paused check — skip evaluation while paused
 		if deploy.Spec.Paused {
+			slog.Log(ctx, trace.LevelTrace, "deployment is paused, skipping evaluation",
+				"deployment", event.DeploymentKey(),
+			)
 			lastSeenPaused = true
 			continue
 		}
@@ -180,6 +189,15 @@ func (a *RolloutAnalyzer) monitorRollout(ctx context.Context, clientset kubernet
 		available := deploy.Status.AvailableReplicas
 		unavailable := deploy.Status.UnavailableReplicas
 
+		slog.Log(ctx, trace.LevelTrace, "poll cycle replica state",
+			"deployment", event.DeploymentKey(),
+			"desired", desired,
+			"updated", updated,
+			"available", available,
+			"unavailable", unavailable,
+			"last_progress_ago", now.Sub(progress.lastProgressAt).String(),
+		)
+
 		progress.recordProgress(updated, available, unavailable, now)
 
 		if now.Sub(progress.lastProgressAt) > a.config.InactivityTimeout {
@@ -187,6 +205,10 @@ func (a *RolloutAnalyzer) monitorRollout(ctx context.Context, clientset kubernet
 		}
 
 		if updated == desired && available == desired && unavailable == 0 {
+			slog.Log(ctx, trace.LevelTrace, "replicas converged, entering soak",
+				"deployment", event.DeploymentKey(),
+				"desired", desired,
+			)
 			// Step 4: Soak period
 			return a.soak(ctx, clientset, event, deploy)
 		}
@@ -207,6 +229,9 @@ func (a *RolloutAnalyzer) checkFailureConditions(
 		if cond.Type == appsv1.DeploymentProgressing &&
 			cond.Status == corev1.ConditionFalse &&
 			cond.Reason == "ProgressDeadlineExceeded" {
+			slog.Log(ctx, trace.LevelTrace, "ProgressDeadlineExceeded condition detected",
+				"deployment", deploy.Namespace+"/"+deploy.Name,
+			)
 			return ResultFailed, "ProgressDeadlineExceeded"
 		}
 	}
@@ -214,6 +239,11 @@ func (a *RolloutAnalyzer) checkFailureConditions(
 	// Check pods of new ReplicaSet for early failure signals
 	newRS, err := a.findNewReplicaSet(ctx, clientset, deploy)
 	if err != nil || newRS == nil {
+		slog.Log(ctx, trace.LevelTrace, "new ReplicaSet lookup",
+			"deployment", deploy.Namespace+"/"+deploy.Name,
+			"found", newRS != nil,
+			"error", err,
+		)
 		return "", ""
 	}
 
@@ -221,6 +251,12 @@ func (a *RolloutAnalyzer) checkFailureConditions(
 	if err != nil {
 		return "", ""
 	}
+
+	slog.Log(ctx, trace.LevelTrace, "checking failure conditions",
+		"deployment", deploy.Namespace+"/"+deploy.Name,
+		"rs", newRS.Name,
+		"pod_count", len(pods),
+	)
 
 	var totalRestarts int32
 	hasWaitingBeforeStart := false
@@ -230,6 +266,11 @@ func (a *RolloutAnalyzer) checkFailureConditions(
 			// Generic waiting pattern: any container stuck in Waiting with no restarts
 			// and the pod has existed longer than ConfigErrorWindow is a failure signal.
 			if cs.State.Waiting != nil && cs.State.Waiting.Reason != "" && cs.RestartCount == 0 {
+				slog.Log(ctx, trace.LevelTrace, "container waiting before first start",
+					"pod", pod.Name,
+					"container", cs.Name,
+					"reason", cs.State.Waiting.Reason,
+				)
 				hasWaitingBeforeStart = true
 
 				if configErrorFirstSeen.IsZero() {
@@ -242,6 +283,14 @@ func (a *RolloutAnalyzer) checkFailureConditions(
 			totalRestarts += cs.RestartCount
 		}
 	}
+
+	slog.Log(ctx, trace.LevelTrace, "failure condition check complete",
+		"deployment", deploy.Namespace+"/"+deploy.Name,
+		"total_restarts", totalRestarts,
+		"restart_threshold", a.config.RestartThreshold,
+		"has_waiting", hasWaitingBeforeStart,
+		"config_error_timer_active", !configErrorFirstSeen.IsZero(),
+	)
 
 	// Reset config error timer if no containers are stuck waiting before start
 	if !configErrorFirstSeen.IsZero() && !hasWaitingBeforeStart {
@@ -276,6 +325,10 @@ func (a *RolloutAnalyzer) soak(ctx context.Context, clientset kubernetes.Interfa
 			}
 		}
 	}
+	slog.Log(ctx, trace.LevelTrace, "pre-soak restart snapshot",
+		"deployment", event.DeploymentKey(),
+		"container_count", len(preRestarts),
+	)
 
 	select {
 	case <-ctx.Done():
@@ -294,6 +347,14 @@ func (a *RolloutAnalyzer) soak(ctx context.Context, clientset kubernetes.Interfa
 		desired = *deploy.Spec.Replicas
 	}
 
+	slog.Log(ctx, trace.LevelTrace, "post-soak deployment state",
+		"deployment", event.DeploymentKey(),
+		"desired", desired,
+		"updated", deploy.Status.UpdatedReplicas,
+		"available", deploy.Status.AvailableReplicas,
+		"unavailable", deploy.Status.UnavailableReplicas,
+	)
+
 	if deploy.Status.UpdatedReplicas != desired ||
 		deploy.Status.AvailableReplicas != desired ||
 		deploy.Status.UnavailableReplicas != 0 {
@@ -309,6 +370,12 @@ func (a *RolloutAnalyzer) soak(ctx context.Context, clientset kubernetes.Interfa
 				for _, cs := range pod.Status.ContainerStatuses {
 					key := pod.Name + "/" + cs.Name
 					if pre, ok := preRestarts[key]; ok && cs.RestartCount > pre {
+						slog.Log(ctx, trace.LevelTrace, "restart count increased during soak",
+							"pod", pod.Name,
+							"container", cs.Name,
+							"pre_soak", pre,
+							"post_soak", cs.RestartCount,
+						)
 						return ResultUnstable, fmt.Sprintf("container %s in pod %s restarted during soak (%d → %d)",
 							cs.Name, pod.Name, pre, cs.RestartCount)
 					}
@@ -317,6 +384,9 @@ func (a *RolloutAnalyzer) soak(ctx context.Context, clientset kubernetes.Interfa
 				// Check pods still ready
 				for _, cond := range pod.Status.Conditions {
 					if cond.Type == corev1.PodReady && cond.Status != corev1.ConditionTrue {
+						slog.Log(ctx, trace.LevelTrace, "pod not ready during soak",
+							"pod", pod.Name,
+						)
 						return ResultUnstable, fmt.Sprintf("pod %s dropped out of Ready during soak", pod.Name)
 					}
 				}
@@ -337,10 +407,18 @@ func (a *RolloutAnalyzer) gatherDiagnostics(ctx context.Context, clientset kuber
 
 	// Step 6: Collect Warning events
 	report.Events = a.collectEvents(ctx, clientset, event)
+	slog.Log(ctx, trace.LevelTrace, "gathered diagnostic events",
+		"deployment", event.DeploymentKey(),
+		"event_count", len(report.Events),
+	)
 
 	// Step 7: Inspect pod status
 	newRS, err := a.findNewReplicaSet(ctx, clientset, deploy)
 	if err != nil || newRS == nil {
+		slog.Log(ctx, trace.LevelTrace, "new RS not found for diagnostics",
+			"deployment", event.DeploymentKey(),
+			"error", err,
+		)
 		return
 	}
 
@@ -348,6 +426,12 @@ func (a *RolloutAnalyzer) gatherDiagnostics(ctx context.Context, clientset kuber
 	if err != nil {
 		return
 	}
+
+	slog.Log(ctx, trace.LevelTrace, "gathering diagnostics from pods",
+		"deployment", event.DeploymentKey(),
+		"rs", newRS.Name,
+		"pod_count", len(pods),
+	)
 
 	for _, pod := range pods {
 		// Init container statuses
@@ -491,6 +575,15 @@ func (a *RolloutAnalyzer) fetchLogs(
 
 	allLines := countLines(data)
 	filtered := filterErrorLines(data)
+
+	slog.Log(ctx, trace.LevelTrace, "fetched container logs",
+		"pod", podName,
+		"container", containerName,
+		"previous", previous,
+		"total_lines", allLines,
+		"filtered_lines", len(filtered),
+	)
+
 	if len(filtered) == 0 {
 		return nil
 	}
