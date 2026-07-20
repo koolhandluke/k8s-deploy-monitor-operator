@@ -5,13 +5,13 @@ import (
 	"testing"
 	"time"
 
-	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes/fake"
 	ktesting "k8s.io/client-go/testing"
+
+	"github.com/koolhandluke/k8s-deploy-monitor-operator/internal/diagnostic/testdata"
 )
 
 // fastConfig returns an AnalyzerConfig with very short timeouts for testing.
@@ -29,9 +29,9 @@ func fastConfig() AnalyzerConfig {
 }
 
 func TestMonitorRollout_SuccessImmediate(t *testing.T) {
-	deploy := stableDeployment()
-	rs := newReplicaSet(deploy.UID)
-	pod := readyPod("myapp-abc123-p1", rs.UID)
+	deploy := yamlToDeploy(t, testdata.DeploymentStable)
+	rs := yamlToReplicaSet(t, testdata.ReplicasetNew)
+	pod := yamlToPod(t, testdata.PodReady)
 
 	clientset := fake.NewSimpleClientset(deploy, rs, pod)
 
@@ -46,9 +46,9 @@ func TestMonitorRollout_SuccessImmediate(t *testing.T) {
 }
 
 func TestMonitorRollout_FailsOnDeadlineExceeded(t *testing.T) {
-	deploy := deadlineExceededDeployment()
-	rs := newReplicaSet(deploy.UID)
-	pod := readyPod("myapp-abc123-p1", rs.UID)
+	deploy := yamlToDeploy(t, testdata.DeploymentDeadlineExceeded)
+	rs := yamlToReplicaSet(t, testdata.ReplicasetNew)
+	pod := yamlToPod(t, testdata.PodReady)
 
 	clientset := fake.NewSimpleClientset(deploy, rs, pod)
 
@@ -67,8 +67,8 @@ func TestMonitorRollout_FailsOnDeadlineExceeded(t *testing.T) {
 
 func TestMonitorRollout_StallTimeout(t *testing.T) {
 	// Deployment never converges, never makes progress
-	deploy := progressingDeployment()
-	rs := newReplicaSet(deploy.UID)
+	deploy := yamlToDeploy(t, testdata.DeploymentProgressing)
+	rs := yamlToReplicaSet(t, testdata.ReplicasetNew)
 
 	clientset := fake.NewSimpleClientset(deploy, rs)
 
@@ -84,10 +84,49 @@ func TestMonitorRollout_StallTimeout(t *testing.T) {
 	}
 }
 
+// TestMonitorRollout_AbsoluteTimeoutStall tests the absolute timeout path when
+// progress is stale. This is distinct from TestMonitorRollout_StallTimeout which
+// exits via the inactivity check (analyzer.go:183). Here the absolute deadline
+// check (analyzer.go:130) runs first in the loop body and catches stale progress
+// before the inactivity check at the bottom.
+func TestMonitorRollout_AbsoluteTimeoutStall(t *testing.T) {
+	deploy := yamlToDeploy(t, testdata.DeploymentProgressing)
+	rs := yamlToReplicaSet(t, testdata.ReplicasetNew)
+
+	clientset := fake.NewSimpleClientset(deploy, rs)
+
+	// Return zero replica counts so recordProgress(0,0,0) never records
+	// forward movement (initial progressState is also all zeros).
+	clientset.PrependReactor("get", "deployments", func(action ktesting.Action) (bool, runtime.Object, error) {
+		d := deploy.DeepCopy()
+		d.Status.UpdatedReplicas = 0
+		d.Status.AvailableReplicas = 0
+		d.Status.UnavailableReplicas = 0
+		return true, d, nil
+	})
+
+	cfg := fastConfig()
+	// Both timeouts equal: on the tick when they expire, the absolute check
+	// (top of loop) fires before the inactivity check (bottom of loop).
+	cfg.AbsoluteTimeout = 10 * time.Millisecond
+	cfg.InactivityTimeout = 10 * time.Millisecond
+	analyzer := &RolloutAnalyzer{config: cfg}
+	event := testEvent()
+
+	result, reason := analyzer.monitorRollout(context.Background(), clientset, event)
+
+	if result != ResultStalled {
+		t.Errorf("expected STALLED, got %s (reason: %s)", result, reason)
+	}
+	if reason != "absolute timeout reached with no recent progress" {
+		t.Errorf("expected absolute timeout stall reason, got: %s", reason)
+	}
+}
+
 func TestMonitorRollout_AbsoluteTimeout(t *testing.T) {
 	// Deployment makes progress (replica counts change) but never fully converges
-	deploy := progressingDeployment()
-	rs := newReplicaSet(deploy.UID)
+	deploy := yamlToDeploy(t, testdata.DeploymentProgressing)
+	rs := yamlToReplicaSet(t, testdata.ReplicasetNew)
 
 	clientset := fake.NewSimpleClientset(deploy, rs)
 
@@ -116,7 +155,7 @@ func TestMonitorRollout_AbsoluteTimeout(t *testing.T) {
 }
 
 func TestMonitorRollout_ContextCancelled(t *testing.T) {
-	deploy := progressingDeployment()
+	deploy := yamlToDeploy(t, testdata.DeploymentProgressing)
 	clientset := fake.NewSimpleClientset(deploy)
 
 	cfg := fastConfig()
@@ -135,11 +174,9 @@ func TestMonitorRollout_ContextCancelled(t *testing.T) {
 
 func TestMonitorRollout_GenerationGate(t *testing.T) {
 	// Start with generation mismatch, then resolve to stable
-	deploy := progressingDeployment()
-	deploy.Generation = 3
-	deploy.Status.ObservedGeneration = 2
-	rs := newReplicaSet(deploy.UID)
-	pod := readyPod("myapp-abc123-p1", rs.UID)
+	deploy := yamlToDeploy(t, testdata.DeploymentGenerationMismatch)
+	rs := yamlToReplicaSet(t, testdata.ReplicasetNew)
+	pod := yamlToPod(t, testdata.PodReady)
 
 	clientset := fake.NewSimpleClientset(deploy, rs, pod)
 
@@ -152,7 +189,7 @@ func TestMonitorRollout_GenerationGate(t *testing.T) {
 			return true, d, nil
 		}
 		// After that: stable
-		d := stableDeployment()
+		d := yamlToDeploy(t, testdata.DeploymentStable)
 		d.Generation = 3
 		d.Status.ObservedGeneration = 3
 		return true, d, nil
@@ -172,7 +209,7 @@ func TestMonitorRollout_GenerationGate(t *testing.T) {
 }
 
 func TestMonitorRollout_Deleted(t *testing.T) {
-	deploy := progressingDeployment()
+	deploy := yamlToDeploy(t, testdata.DeploymentProgressing)
 	clientset := fake.NewSimpleClientset(deploy)
 
 	clientset.PrependReactor("get", "deployments", func(action ktesting.Action) (bool, runtime.Object, error) {
@@ -190,9 +227,8 @@ func TestMonitorRollout_Deleted(t *testing.T) {
 }
 
 func TestMonitorRollout_Paused(t *testing.T) {
-	deploy := progressingDeployment()
-	deploy.Spec.Paused = true
-	rs := newReplicaSet(deploy.UID)
+	deploy := yamlToDeploy(t, testdata.DeploymentPaused)
+	rs := yamlToReplicaSet(t, testdata.ReplicasetNew)
 
 	clientset := fake.NewSimpleClientset(deploy, rs)
 
@@ -210,9 +246,9 @@ func TestMonitorRollout_Paused(t *testing.T) {
 
 func TestMonitorRollout_SuccessAfterProgressing(t *testing.T) {
 	// Deployment starts progressing, then converges
-	deploy := progressingDeployment()
-	rs := newReplicaSet(deploy.UID)
-	pod := readyPod("myapp-abc123-p1", rs.UID)
+	deploy := yamlToDeploy(t, testdata.DeploymentProgressing)
+	rs := yamlToReplicaSet(t, testdata.ReplicasetNew)
+	pod := yamlToPod(t, testdata.PodReady)
 
 	clientset := fake.NewSimpleClientset(deploy, rs, pod)
 
@@ -220,9 +256,9 @@ func TestMonitorRollout_SuccessAfterProgressing(t *testing.T) {
 	clientset.PrependReactor("get", "deployments", func(action ktesting.Action) (bool, runtime.Object, error) {
 		callCount++
 		if callCount == 1 {
-			return true, progressingDeployment(), nil
+			return true, yamlToDeploy(t, testdata.DeploymentProgressing), nil
 		}
-		return true, stableDeployment(), nil
+		return true, yamlToDeploy(t, testdata.DeploymentStable), nil
 	})
 
 	analyzer := &RolloutAnalyzer{config: fastConfig()}
@@ -237,31 +273,9 @@ func TestMonitorRollout_SuccessAfterProgressing(t *testing.T) {
 
 func TestMonitorRollout_GenericWaitingFails(t *testing.T) {
 	// Pod stuck in ImagePullBackOff with 0 restarts, should fail after config error window
-	deploy := progressingDeployment()
-	rs := newReplicaSet(deploy.UID)
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "myapp-abc123-imgpull",
-			Namespace: "default",
-			Labels:    map[string]string{"app": "myapp"},
-			OwnerReferences: []metav1.OwnerReference{
-				{UID: rs.UID, Name: "myapp-abc123", Kind: "ReplicaSet"},
-			},
-		},
-		Status: corev1.PodStatus{
-			Phase: corev1.PodPending,
-			ContainerStatuses: []corev1.ContainerStatus{
-				{
-					Name:         "myapp",
-					Ready:        false,
-					RestartCount: 0,
-					State: corev1.ContainerState{
-						Waiting: &corev1.ContainerStateWaiting{Reason: "ImagePullBackOff"},
-					},
-				},
-			},
-		},
-	}
+	deploy := yamlToDeploy(t, testdata.DeploymentProgressing)
+	rs := yamlToReplicaSet(t, testdata.ReplicasetNew)
+	pod := yamlToPod(t, testdata.PodImagePullBackoff)
 
 	clientset := fake.NewSimpleClientset(deploy, rs, pod)
 

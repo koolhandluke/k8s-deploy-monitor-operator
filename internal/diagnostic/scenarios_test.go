@@ -6,92 +6,75 @@ import (
 	"testing"
 	"time"
 
-	appsv1 "k8s.io/api/apps/v1"
-	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
+
+	"github.com/koolhandluke/k8s-deploy-monitor-operator/internal/diagnostic/testdata"
 )
 
-func progressingDeployment() *appsv1.Deployment {
-	return &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:       "myapp",
-			Namespace:  "default",
-			UID:        types.UID("deploy-uid"),
-			Generation: 2,
-			Annotations: map[string]string{
-				"deployment.kubernetes.io/revision": "2",
-			},
-		},
-		Spec: appsv1.DeploymentSpec{
-			Replicas: int32Ptr(3),
-			Selector: &metav1.LabelSelector{
-				MatchLabels: map[string]string{"app": "myapp"},
-			},
-		},
-		Status: appsv1.DeploymentStatus{
-			ObservedGeneration:  2,
-			Replicas:            3,
-			UpdatedReplicas:     1,
-			AvailableReplicas:   1,
-			UnavailableReplicas: 2,
-			Conditions: []appsv1.DeploymentCondition{
-				{
-					Type:   appsv1.DeploymentProgressing,
-					Status: corev1.ConditionTrue,
-					Reason: "ReplicaSetUpdated",
-				},
-			},
-		},
-	}
-}
+// TestConfigErrorTimerResets verifies that the configErrorFirstSeen timer resets
+// when all containers leave the Waiting state. Without this reset, a transient
+// Waiting→Running→Waiting sequence could accumulate time across both episodes
+// and trigger a false FAILED.
+func TestConfigErrorTimerResets(t *testing.T) {
+	deploy := yamlToDeploy(t, testdata.DeploymentProgressing)
+	rs := yamlToReplicaSet(t, testdata.ReplicasetNew)
+	waitingPod := yamlToPod(t, testdata.PodConfigError)
+	readyPod := yamlToPod(t, testdata.PodReady)
 
-func deadlineExceededDeployment() *appsv1.Deployment {
-	d := progressingDeployment()
-	d.Status.Conditions = []appsv1.DeploymentCondition{
-		{
-			Type:   appsv1.DeploymentProgressing,
-			Status: corev1.ConditionFalse,
-			Reason: "ProgressDeadlineExceeded",
-		},
-	}
-	return d
-}
+	cfg := DefaultAnalyzerConfig()
+	cfg.ConfigErrorWindow = 90 * time.Second
+	now := time.Now()
+	progress := &progressState{lastProgressAt: now}
 
-func waitingPod(name string, rsUID types.UID, reason string, restarts int32) *corev1.Pod {
-	return &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: "default",
-			Labels:    map[string]string{"app": "myapp"},
-			OwnerReferences: []metav1.OwnerReference{
-				{UID: rsUID, Name: "myapp-abc123", Kind: "ReplicaSet"},
-			},
-		},
-		Status: corev1.PodStatus{
-			Phase: corev1.PodPending,
-			ContainerStatuses: []corev1.ContainerStatus{
-				{
-					Name:         "myapp",
-					Ready:        false,
-					RestartCount: restarts,
-					State: corev1.ContainerState{
-						Waiting: &corev1.ContainerStateWaiting{Reason: reason},
-					},
-				},
-			},
-		},
+	// Step 1: Pod is Waiting — stamps configErrorFirstSeen
+	clientset := fake.NewSimpleClientset(deploy, rs, waitingPod)
+	analyzer := &RolloutAnalyzer{config: cfg}
+	configFirstSeen := time.Time{}
+
+	result, _ := analyzer.checkFailureConditions(
+		context.Background(), clientset, deploy, now, progress, &configFirstSeen,
+	)
+	if result != "" {
+		t.Fatalf("expected no result on first check, got %q", result)
+	}
+	if configFirstSeen.IsZero() {
+		t.Fatal("expected configErrorFirstSeen to be stamped after seeing Waiting pod")
+	}
+
+	// Step 2: Pod recovers to Ready — should reset the timer
+	clientset = fake.NewSimpleClientset(deploy, rs, readyPod)
+	result, _ = analyzer.checkFailureConditions(
+		context.Background(), clientset, deploy, now.Add(30*time.Second), progress, &configFirstSeen,
+	)
+	if result != "" {
+		t.Fatalf("expected no result after recovery, got %q", result)
+	}
+	if !configFirstSeen.IsZero() {
+		t.Fatal("expected configErrorFirstSeen to be reset after pod recovered")
+	}
+
+	// Step 3: Pod goes back to Waiting — timer should restart from zero,
+	// so even though 95s total have elapsed (30s + 65s), only 65s count
+	// against the window (which is 90s). Should NOT trigger failure.
+	clientset = fake.NewSimpleClientset(deploy, rs, waitingPod)
+	result, _ = analyzer.checkFailureConditions(
+		context.Background(), clientset, deploy, now.Add(95*time.Second), progress, &configFirstSeen,
+	)
+	if result != "" {
+		t.Fatalf("expected no result (timer was reset), got %q", result)
+	}
+	if configFirstSeen.IsZero() {
+		t.Fatal("expected configErrorFirstSeen to be re-stamped")
 	}
 }
 
 func TestCheckFailureConditions(t *testing.T) {
-	rs := newReplicaSet(types.UID("deploy-uid"))
+	rs := yamlToReplicaSet(t, testdata.ReplicasetNew)
 
 	tests := []struct {
 		name             string
-		deploy           *appsv1.Deployment
+		deployFixture    string
 		pods             []runtime.Object
 		configSeenAgo    time.Duration
 		expectedResult   Result
@@ -99,52 +82,77 @@ func TestCheckFailureConditions(t *testing.T) {
 	}{
 		{
 			name:             "ProgressDeadlineExceeded",
-			deploy:           deadlineExceededDeployment(),
-			pods:             []runtime.Object{readyPod("myapp-abc123-p1", rs.UID)},
+			deployFixture:    testdata.DeploymentDeadlineExceeded,
+			pods:             []runtime.Object{yamlToPod(t, testdata.PodReady)},
 			expectedResult:   ResultFailed,
 			expectedContains: "ProgressDeadlineExceeded",
 		},
 		{
 			name:             "InvalidImageName triggers generic waiting after window",
-			deploy:           progressingDeployment(),
-			pods:             []runtime.Object{waitingPod("myapp-abc123-inv", rs.UID, "InvalidImageName", 0)},
+			deployFixture:    testdata.DeploymentProgressing,
+			pods:             []runtime.Object{yamlToPod(t, testdata.PodInvalidImage)},
 			configSeenAgo:    91 * time.Second,
 			expectedResult:   ResultFailed,
 			expectedContains: "InvalidImageName",
 		},
 		{
-			name:             "CrashLoop restart threshold",
-			deploy:           progressingDeployment(),
-			pods:             []runtime.Object{waitingPod("myapp-abc123-crash", rs.UID, "CrashLoopBackOff", 4)},
+			name:          "CrashLoop restart threshold",
+			deployFixture: testdata.DeploymentProgressing,
+			pods: func() []runtime.Object {
+				p := yamlToPod(t, testdata.PodCrashloop)
+				p.Name = "myapp-abc123-crash"
+				return []runtime.Object{p}
+			}(),
 			expectedResult:   ResultFailed,
 			expectedContains: "restart threshold",
 		},
 		{
-			name:           "CreateContainerConfigError before window",
-			deploy:         progressingDeployment(),
-			pods:           []runtime.Object{waitingPod("myapp-abc123-cfg", rs.UID, "CreateContainerConfigError", 0)},
+			name:          "CreateContainerConfigError before window",
+			deployFixture: testdata.DeploymentProgressing,
+			pods: func() []runtime.Object {
+				p := yamlToPod(t, testdata.PodConfigError)
+				p.Name = "myapp-abc123-cfg"
+				return []runtime.Object{p}
+			}(),
 			configSeenAgo:  0,
 			expectedResult: "",
 		},
 		{
-			name:             "CreateContainerConfigError after window",
-			deploy:           progressingDeployment(),
-			pods:             []runtime.Object{waitingPod("myapp-abc123-cfg", rs.UID, "CreateContainerConfigError", 0)},
+			name:          "CreateContainerConfigError after window",
+			deployFixture: testdata.DeploymentProgressing,
+			pods: func() []runtime.Object {
+				p := yamlToPod(t, testdata.PodConfigError)
+				p.Name = "myapp-abc123-cfg"
+				return []runtime.Object{p}
+			}(),
 			configSeenAgo:    91 * time.Second,
 			expectedResult:   ResultFailed,
 			expectedContains: "CreateContainerConfigError",
 		},
 		{
+			name:           "OOMKilled under restart threshold - no failure",
+			deployFixture:  testdata.DeploymentProgressing,
+			pods:           []runtime.Object{yamlToPod(t, testdata.PodOOMKilled)},
+			expectedResult: "",
+		},
+		{
+			name:           "Pending pod with no container status - no failure",
+			deployFixture:  testdata.DeploymentProgressing,
+			pods:           []runtime.Object{yamlToPod(t, testdata.PodPendingNoStatus)},
+			expectedResult: "",
+		},
+		{
 			name:           "Healthy - no failure",
-			deploy:         stableDeployment(),
-			pods:           []runtime.Object{readyPod("myapp-abc123-p1", rs.UID)},
+			deployFixture:  testdata.DeploymentStable,
+			pods:           []runtime.Object{yamlToPod(t, testdata.PodReady)},
 			expectedResult: "",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			objs := []runtime.Object{tt.deploy, rs}
+			deploy := yamlToDeploy(t, tt.deployFixture)
+			objs := []runtime.Object{deploy, rs}
 			objs = append(objs, tt.pods...)
 			clientset := fake.NewSimpleClientset(objs...)
 
@@ -160,7 +168,7 @@ func TestCheckFailureConditions(t *testing.T) {
 			}
 
 			result, reason := analyzer.checkFailureConditions(
-				context.Background(), clientset, tt.deploy, now, progress, &configFirstSeen,
+				context.Background(), clientset, deploy, now, progress, &configFirstSeen,
 			)
 
 			if result != tt.expectedResult {
