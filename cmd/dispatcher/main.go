@@ -65,10 +65,6 @@ func main() {
 	// Build targets inline
 	targets := []dispatch.Target{&dispatch.LogTarget{}}
 
-	if cfg.DispatchMode == config.DispatchHolmes || cfg.DispatchMode == config.DispatchBoth {
-		targets = append(targets, dispatch.NewHolmesTarget(cfg.HolmesAPIURL, &http.Client{Timeout: 5 * time.Minute}))
-	}
-
 	if cfg.DispatchMode == config.DispatchSlack || cfg.DispatchMode == config.DispatchBoth {
 		targets = append(targets, dispatch.NewSlackTarget(cfg.SlackWebhookURL, &http.Client{Timeout: 10 * time.Second}))
 	}
