@@ -1,0 +1,29 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: myapp
+  namespace: default
+  uid: deploy-uid
+  generation: 2
+  annotations:
+    deployment.kubernetes.io/revision: "2"
+spec:
+  paused: true
+  replicas: 3
+  selector:
+    matchLabels:
+      app: myapp
+  template:
+    metadata:
+      labels:
+        app: myapp
+    spec:
+      containers:
+        - name: myapp
+          image: myapp:v2
+status:
+  observedGeneration: 2
+  replicas: 3
+  updatedReplicas: 1
+  availableReplicas: 1
+  unavailableReplicas: 2

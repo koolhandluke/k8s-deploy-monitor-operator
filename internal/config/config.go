@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"strconv"
 	"strings"
@@ -14,6 +15,15 @@ const (
 	DispatchHolmes DispatchMode = "holmes"
 	DispatchSlack  DispatchMode = "slack"
 	DispatchBoth   DispatchMode = "both"
+)
+
+// InvestigationMode controls how rollout outcomes are investigated and reported.
+type InvestigationMode string
+
+const (
+	InvestigationNone    InvestigationMode = "none"
+	InvestigationRunbook InvestigationMode = "runbook"
+	InvestigationHolmes  InvestigationMode = "holmes"
 )
 
 type Config struct {
@@ -44,9 +54,13 @@ type Config struct {
 	// Split mode: when true, monitor only writes CRDs; dispatcher service handles dispatch
 	DispatcherSplit bool
 
-	// Diagnostic
+	// Diagnostic (legacy, superseded by InvestigationMode)
 	DiagnosticEnabled       bool
 	DiagnosticMaxConcurrent int
+
+	// Investigation
+	InvestigationMode          InvestigationMode
+	InvestigationMaxConcurrent int
 
 	// Logging
 	Debug bool
@@ -97,9 +111,46 @@ func Load() (*Config, error) {
 	c.QueueMaxSize = envInt("QUEUE_MAX_SIZE", 100)
 	c.RescanIntervalSeconds = envInt("RESCAN_INTERVAL_SECONDS", 600)
 
-	// Diagnostic
+	// Diagnostic (legacy)
 	c.DiagnosticEnabled = strings.ToLower(os.Getenv("DIAGNOSTIC_ENABLED")) == "true"
 	c.DiagnosticMaxConcurrent = envInt("DIAGNOSTIC_MAX_CONCURRENT", 10)
+
+	// Investigation mode
+	invMode := strings.ToLower(os.Getenv("INVESTIGATION_MODE"))
+	switch InvestigationMode(invMode) {
+	case InvestigationRunbook, InvestigationHolmes, InvestigationNone:
+		c.InvestigationMode = InvestigationMode(invMode)
+	case "":
+		c.InvestigationMode = InvestigationNone
+		// Backward compat: map DISPATCH_MODE to InvestigationMode if INVESTIGATION_MODE not set
+		if c.DispatchMode == DispatchHolmes || c.DispatchMode == DispatchBoth {
+			if c.DiagnosticEnabled {
+				// Old config had both diagnostic and holmes; map to holmes investigation
+				c.InvestigationMode = InvestigationHolmes
+				slog.Warn("DISPATCH_MODE is deprecated for investigation; use INVESTIGATION_MODE=holmes")
+			}
+		}
+		if c.DispatchMode == DispatchSlack && c.DiagnosticEnabled {
+			c.InvestigationMode = InvestigationRunbook
+			slog.Warn("DISPATCH_MODE is deprecated for investigation; use INVESTIGATION_MODE=runbook")
+		}
+	default:
+		return nil, fmt.Errorf("invalid INVESTIGATION_MODE: %q (must be none|runbook|holmes)", invMode)
+	}
+	c.InvestigationMaxConcurrent = envInt("INVESTIGATION_MAX_CONCURRENT", 10)
+
+	// Validate investigation dependencies
+	if c.InvestigationMode == InvestigationRunbook && c.SlackWebhookURL == "" {
+		return nil, fmt.Errorf("SLACK_WEBHOOK_URL required when INVESTIGATION_MODE=runbook")
+	}
+	if c.InvestigationMode == InvestigationHolmes {
+		if c.SlackWebhookURL == "" {
+			return nil, fmt.Errorf("SLACK_WEBHOOK_URL required when INVESTIGATION_MODE=holmes")
+		}
+		if c.HolmesAPIURL == "" {
+			return nil, fmt.Errorf("HOLMES_API_URL required when INVESTIGATION_MODE=holmes")
+		}
+	}
 
 	// Logging
 	c.Debug = strings.ToLower(os.Getenv("DEBUG")) == "true"

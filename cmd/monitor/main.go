@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -19,6 +20,7 @@ import (
 	"github.com/koolhandluke/k8s-deploy-monitor-operator/internal/config"
 	"github.com/koolhandluke/k8s-deploy-monitor-operator/internal/diagnostic"
 	"github.com/koolhandluke/k8s-deploy-monitor-operator/internal/dispatch"
+	"github.com/koolhandluke/k8s-deploy-monitor-operator/internal/investigation"
 	"github.com/koolhandluke/k8s-deploy-monitor-operator/internal/models"
 	"github.com/koolhandluke/k8s-deploy-monitor-operator/internal/persistence"
 	"github.com/koolhandluke/k8s-deploy-monitor-operator/internal/watcher"
@@ -51,6 +53,7 @@ func main() {
 	slog.Info("starting rollout monitor",
 		"clusters", len(clusters),
 		"dispatch_mode", cfg.DispatchMode,
+		"investigation_mode", cfg.InvestigationMode,
 		"persistence", cfg.PersistenceEnabled,
 		"diagnostic", cfg.DiagnosticEnabled,
 		"debounce_seconds", cfg.DebounceSeconds,
@@ -91,6 +94,7 @@ func main() {
 
 	var dispatcher *dispatch.Dispatcher
 	var diagTarget *diagnostic.AsyncDiagnosticTarget
+	var orchestrator *investigation.Orchestrator
 
 	if cfg.DispatcherSplit {
 		// Split mode: monitor only writes CRDs, dispatcher service handles dispatch
@@ -110,13 +114,39 @@ func main() {
 		// Combined mode: monitor dispatches events directly (original behavior)
 		dispatcher = dispatch.NewDispatcher(cfg, eventCh, recorder)
 
-		// Register async diagnostic target if enabled
-		if cfg.DiagnosticEnabled {
+		// Register investigation orchestrator if configured
+		if cfg.InvestigationMode != config.InvestigationNone {
 			registry := diagnostic.NewClusterRegistry(clusters)
-			analyzer := diagnostic.NewRolloutAnalyzer(registry)
+			slackReporter := investigation.NewSlackReporter(
+				cfg.SlackWebhookURL,
+				&http.Client{Timeout: 30 * time.Second},
+			)
+
+			var investigator investigation.Investigator
+			switch cfg.InvestigationMode {
+			case config.InvestigationRunbook:
+				analyzer := diagnostic.NewRolloutAnalyzer(registry, diagnostic.DefaultAnalyzerConfig())
+				investigator = investigation.NewRunbookInvestigator(analyzer)
+			case config.InvestigationHolmes:
+				investigator = investigation.NewHolmesInvestigator(
+					cfg.HolmesAPIURL,
+					&http.Client{Timeout: 5 * time.Minute},
+				)
+			}
+
+			orchestrator = investigation.NewOrchestrator(investigator, slackReporter, cfg.InvestigationMaxConcurrent)
+			dispatcher.AddTarget(investigation.NewInvestigationTarget(orchestrator))
+			slog.Info("investigation mode enabled",
+				"mode", cfg.InvestigationMode,
+				"max_concurrent", cfg.InvestigationMaxConcurrent,
+			)
+		} else if cfg.DiagnosticEnabled {
+			// Legacy diagnostic target (backward compat)
+			registry := diagnostic.NewClusterRegistry(clusters)
+			analyzer := diagnostic.NewRolloutAnalyzer(registry, diagnostic.DefaultAnalyzerConfig())
 			diagTarget = diagnostic.NewAsyncDiagnosticTarget(analyzer, cfg.DiagnosticMaxConcurrent)
 			dispatcher.AddTarget(diagTarget)
-			slog.Info("diagnostic target enabled", "max_concurrent", cfg.DiagnosticMaxConcurrent)
+			slog.Info("diagnostic target enabled (legacy)", "max_concurrent", cfg.DiagnosticMaxConcurrent)
 		}
 
 		dispatcher.Start(ctx)
@@ -147,6 +177,9 @@ func main() {
 	close(eventCh)
 	if dispatcher != nil {
 		dispatcher.Wait()
+	}
+	if orchestrator != nil {
+		orchestrator.Stop()
 	}
 	if diagTarget != nil {
 		diagTarget.Stop()

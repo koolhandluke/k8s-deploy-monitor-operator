@@ -12,6 +12,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/kubernetes"
@@ -19,30 +20,51 @@ import (
 	"github.com/koolhandluke/k8s-deploy-monitor-operator/internal/models"
 )
 
-const (
-	defaultPollInterval     = 10 * time.Second
-	defaultInactivityTimeout = 5 * time.Minute
-	defaultAbsoluteTimeout  = 10 * time.Minute
-	defaultSoakPeriod       = 60 * time.Second
-	defaultRestartThreshold = int32(3)
-	defaultRestartWindow    = 5 * time.Minute
-	defaultLogTailLines     = int64(500)
+// AnalyzerConfig holds tunable parameters for the rollout analyzer.
+// Tests inject short durations; production uses DefaultAnalyzerConfig().
+type AnalyzerConfig struct {
+	PollInterval      time.Duration
+	InactivityTimeout time.Duration
+	AbsoluteTimeout   time.Duration
+	SoakPeriod        time.Duration
+	RestartThreshold  int32
+	RestartWindow     time.Duration
+	ConfigErrorWindow time.Duration
+	LogTailLines      int64
+}
 
-	// How long CreateContainerConfigError must persist before we fast-fail.
-	configErrorConfirmWindow = 90 * time.Second
-)
+// DefaultAnalyzerConfig returns production defaults.
+func DefaultAnalyzerConfig() AnalyzerConfig {
+	return AnalyzerConfig{
+		PollInterval:      10 * time.Second,
+		InactivityTimeout: 5 * time.Minute,
+		AbsoluteTimeout:   10 * time.Minute,
+		SoakPeriod:        60 * time.Second,
+		RestartThreshold:  3,
+		RestartWindow:     5 * time.Minute,
+		ConfigErrorWindow: 90 * time.Second,
+		LogTailLines:      500,
+	}
+}
 
 // errorLogPatterns are substrings we filter log lines for.
 var errorLogPatterns = []string{"error", "fatal", "panic", "traceback", "exception"}
 
-// RolloutAnalyzer implements the two-phase runbook for a single rollout event.
-type RolloutAnalyzer struct {
-	registry *ClusterRegistry
+// ClientsetProvider abstracts cluster credential lookup.
+// ClusterRegistry implements this; tests inject fakes.
+type ClientsetProvider interface {
+	ClientsetFor(clusterID string) (kubernetes.Interface, error)
 }
 
-// NewRolloutAnalyzer creates an analyzer backed by the given cluster registry.
-func NewRolloutAnalyzer(registry *ClusterRegistry) *RolloutAnalyzer {
-	return &RolloutAnalyzer{registry: registry}
+// RolloutAnalyzer implements the two-phase runbook for a single rollout event.
+type RolloutAnalyzer struct {
+	provider ClientsetProvider
+	config   AnalyzerConfig
+}
+
+// NewRolloutAnalyzer creates an analyzer backed by the given provider and config.
+func NewRolloutAnalyzer(provider ClientsetProvider, cfg AnalyzerConfig) *RolloutAnalyzer {
+	return &RolloutAnalyzer{provider: provider, config: cfg}
 }
 
 // progressState tracks forward progress for stall detection.
@@ -66,7 +88,7 @@ func (p *progressState) recordProgress(updated, available, unavailable int32, no
 func (a *RolloutAnalyzer) Analyze(ctx context.Context, event models.RolloutEvent) (*DiagnosticReport, error) {
 	start := time.Now()
 
-	clientset, err := a.registry.ClientsetFor(event.ClusterID)
+	clientset, err := a.provider.ClientsetFor(event.ClusterID)
 	if err != nil {
 		return nil, fmt.Errorf("getting clientset for cluster %s: %w", event.ClusterID, err)
 	}
@@ -89,11 +111,12 @@ func (a *RolloutAnalyzer) Analyze(ctx context.Context, event models.RolloutEvent
 
 // monitorRollout implements Phase 1 of the runbook.
 func (a *RolloutAnalyzer) monitorRollout(ctx context.Context, clientset kubernetes.Interface, event models.RolloutEvent) (Result, string) {
-	absoluteDeadline := time.Now().Add(defaultAbsoluteTimeout)
+	absoluteDeadline := time.Now().Add(a.config.AbsoluteTimeout)
 	progress := &progressState{lastProgressAt: time.Now()}
 	var configErrorFirstSeen time.Time
+	var lastSeenPaused bool
 
-	ticker := time.NewTicker(defaultPollInterval)
+	ticker := time.NewTicker(a.config.PollInterval)
 	defer ticker.Stop()
 
 	for {
@@ -105,8 +128,12 @@ func (a *RolloutAnalyzer) monitorRollout(ctx context.Context, clientset kubernet
 
 		now := time.Now()
 		if now.After(absoluteDeadline) {
+			// If paused when timeout fires, classify as PAUSED
+			if lastSeenPaused {
+				return ResultPaused, "absolute timeout reached while deployment is paused"
+			}
 			// If we were still seeing progress, it's inconclusive rather than stalled.
-			if now.Sub(progress.lastProgressAt) < defaultInactivityTimeout {
+			if now.Sub(progress.lastProgressAt) < a.config.InactivityTimeout {
 				return ResultInconclusive, "absolute timeout reached while still making progress"
 			}
 			return ResultStalled, "absolute timeout reached with no recent progress"
@@ -114,6 +141,9 @@ func (a *RolloutAnalyzer) monitorRollout(ctx context.Context, clientset kubernet
 
 		deploy, err := clientset.AppsV1().Deployments(event.Namespace).Get(ctx, event.DeploymentName, metav1.GetOptions{})
 		if err != nil {
+			if errors.IsNotFound(err) {
+				return ResultDeleted, "deployment was deleted during analysis"
+			}
 			slog.Warn("failed to get deployment during analysis",
 				"deployment", event.DeploymentKey(),
 				"error", err,
@@ -127,7 +157,14 @@ func (a *RolloutAnalyzer) monitorRollout(ctx context.Context, clientset kubernet
 			continue
 		}
 
-		// Step 2: Check failure conditions
+		// Step 2a: Paused check — skip evaluation while paused
+		if deploy.Spec.Paused {
+			lastSeenPaused = true
+			continue
+		}
+		lastSeenPaused = false
+
+		// Step 2b: Check failure conditions
 		if result, reason := a.checkFailureConditions(ctx, clientset, deploy, now, progress, &configErrorFirstSeen); result != "" {
 			return result, reason
 		}
@@ -143,8 +180,8 @@ func (a *RolloutAnalyzer) monitorRollout(ctx context.Context, clientset kubernet
 
 		progress.recordProgress(updated, available, unavailable, now)
 
-		if now.Sub(progress.lastProgressAt) > defaultInactivityTimeout {
-			return ResultStalled, fmt.Sprintf("no forward progress for %s", defaultInactivityTimeout)
+		if now.Sub(progress.lastProgressAt) > a.config.InactivityTimeout {
+			return ResultStalled, fmt.Sprintf("no forward progress for %s", a.config.InactivityTimeout)
 		}
 
 		if updated == desired && available == desired && unavailable == 0 {
@@ -184,43 +221,33 @@ func (a *RolloutAnalyzer) checkFailureConditions(
 	}
 
 	var totalRestarts int32
+	hasWaitingBeforeStart := false
 	for _, pod := range pods {
 		allStatuses := append(pod.Status.InitContainerStatuses, pod.Status.ContainerStatuses...)
 		for _, cs := range allStatuses {
-			if cs.State.Waiting != nil {
-				switch cs.State.Waiting.Reason {
-				case "InvalidImageName":
-					return ResultFailed, fmt.Sprintf("InvalidImageName in pod %s container %s", pod.Name, cs.Name)
-				case "CreateContainerConfigError":
-					if configErrorFirstSeen.IsZero() {
-						*configErrorFirstSeen = now
-					} else if now.Sub(*configErrorFirstSeen) >= configErrorConfirmWindow {
-						return ResultFailed, fmt.Sprintf("CreateContainerConfigError persisted for %s in pod %s container %s",
-							configErrorConfirmWindow, pod.Name, cs.Name)
-					}
+			// Generic waiting pattern: any container stuck in Waiting with no restarts
+			// and the pod has existed longer than ConfigErrorWindow is a failure signal.
+			if cs.State.Waiting != nil && cs.State.Waiting.Reason != "" && cs.RestartCount == 0 {
+				hasWaitingBeforeStart = true
+
+				if configErrorFirstSeen.IsZero() {
+					*configErrorFirstSeen = now
+				} else if now.Sub(*configErrorFirstSeen) >= a.config.ConfigErrorWindow {
+					return ResultFailed, fmt.Sprintf("%s persisted for %s in pod %s container %s",
+						cs.State.Waiting.Reason, a.config.ConfigErrorWindow, pod.Name, cs.Name)
 				}
 			}
 			totalRestarts += cs.RestartCount
 		}
 	}
 
-	// Reset config error timer if we no longer see it
-	if !configErrorFirstSeen.IsZero() {
-		stillPresent := false
-		for _, pod := range pods {
-			for _, cs := range append(pod.Status.InitContainerStatuses, pod.Status.ContainerStatuses...) {
-				if cs.State.Waiting != nil && cs.State.Waiting.Reason == "CreateContainerConfigError" {
-					stillPresent = true
-				}
-			}
-		}
-		if !stillPresent {
-			*configErrorFirstSeen = time.Time{}
-		}
+	// Reset config error timer if no containers are stuck waiting before start
+	if !configErrorFirstSeen.IsZero() && !hasWaitingBeforeStart {
+		*configErrorFirstSeen = time.Time{}
 	}
 
-	// Restart threshold: 3 restarts across pods within the window
-	if totalRestarts >= defaultRestartThreshold && now.Sub(progress.lastProgressAt) < defaultRestartWindow {
+	// Restart threshold across pods within the window
+	if totalRestarts >= a.config.RestartThreshold && now.Sub(progress.lastProgressAt) < a.config.RestartWindow {
 		return ResultFailed, fmt.Sprintf("restart threshold exceeded: %d restarts", totalRestarts)
 	}
 
@@ -231,7 +258,7 @@ func (a *RolloutAnalyzer) checkFailureConditions(
 func (a *RolloutAnalyzer) soak(ctx context.Context, clientset kubernetes.Interface, event models.RolloutEvent, deploy *appsv1.Deployment) (Result, string) {
 	slog.Info("rollout converged, entering soak period",
 		"deployment", event.DeploymentKey(),
-		"soak_seconds", defaultSoakPeriod.Seconds(),
+		"soak_seconds", a.config.SoakPeriod.Seconds(),
 	)
 
 	// Capture pre-soak restart counts
@@ -251,7 +278,7 @@ func (a *RolloutAnalyzer) soak(ctx context.Context, clientset kubernetes.Interfa
 	select {
 	case <-ctx.Done():
 		return ResultInconclusive, "context cancelled during soak"
-	case <-time.After(defaultSoakPeriod):
+	case <-time.After(a.config.SoakPeriod):
 	}
 
 	// Re-fetch and check for regression
@@ -403,18 +430,17 @@ func (a *RolloutAnalyzer) collectContainerLogs(
 	rolloutStart time.Time,
 	report *DiagnosticReport,
 ) {
-	tailLines := defaultLogTailLines
 	sinceTime := metav1.NewTime(rolloutStart)
 
 	// Current logs
-	current := a.fetchLogs(ctx, clientset, pod.Namespace, pod.Name, containerName, false, tailLines, &sinceTime)
+	current := a.fetchLogs(ctx, clientset, pod.Namespace, pod.Name, containerName, false, a.config.LogTailLines, &sinceTime)
 	if current != nil {
 		current.InitContainer = initContainer
 		report.LogSnippets = append(report.LogSnippets, *current)
 	}
 
 	// Previous logs (critical for crash loops)
-	previous := a.fetchLogs(ctx, clientset, pod.Namespace, pod.Name, containerName, true, tailLines, nil)
+	previous := a.fetchLogs(ctx, clientset, pod.Namespace, pod.Name, containerName, true, a.config.LogTailLines, nil)
 	if previous != nil {
 		previous.InitContainer = initContainer
 		report.LogSnippets = append(report.LogSnippets, *previous)

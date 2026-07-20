@@ -1,0 +1,27 @@
+apiVersion: apps/v1
+kind: ReplicaSet
+metadata:
+  name: myapp-abc123
+  namespace: default
+  uid: rs-uid
+  labels:
+    app: myapp
+  annotations:
+    deployment.kubernetes.io/revision: "2"
+  ownerReferences:
+    - uid: deploy-uid
+      name: myapp
+      kind: Deployment
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: myapp
+  template:
+    metadata:
+      labels:
+        app: myapp
+    spec:
+      containers:
+        - name: myapp
+          image: myapp:v2

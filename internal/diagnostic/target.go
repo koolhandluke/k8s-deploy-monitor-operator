@@ -63,7 +63,8 @@ func (t *AsyncDiagnosticTarget) Dispatch(_ context.Context, event models.Rollout
 		defer t.wg.Done()
 		defer func() { <-t.semaphore }()
 
-		ctx, cancel := context.WithTimeout(t.ctx, defaultAbsoluteTimeout+defaultSoakPeriod+time.Minute)
+		cfg := t.analyzer.config
+		ctx, cancel := context.WithTimeout(t.ctx, cfg.AbsoluteTimeout+cfg.SoakPeriod+time.Minute)
 		defer cancel()
 
 		slog.Info("starting rollout analysis",

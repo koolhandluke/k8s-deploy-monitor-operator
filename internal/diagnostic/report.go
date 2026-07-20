@@ -15,6 +15,8 @@ const (
 	ResultStalled      Result = "STALLED"
 	ResultInconclusive Result = "INCONCLUSIVE"
 	ResultUnstable     Result = "UNSTABLE"
+	ResultPaused       Result = "PAUSED"
+	ResultDeleted      Result = "DELETED"
 )
 
 // DiagnosticReport is the output of a rollout analysis.

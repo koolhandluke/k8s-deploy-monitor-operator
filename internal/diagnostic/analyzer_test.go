@@ -355,7 +355,7 @@ func TestFindNewReplicaSet(t *testing.T) {
 	rs := newReplicaSet(deploy.UID)
 	clientset := fake.NewSimpleClientset(deploy, rs)
 
-	analyzer := &RolloutAnalyzer{}
+	analyzer := &RolloutAnalyzer{config: DefaultAnalyzerConfig()}
 	ctx := context.Background()
 
 	found, err := analyzer.findNewReplicaSet(ctx, clientset, deploy)
@@ -379,7 +379,7 @@ func TestPodsForReplicaSet(t *testing.T) {
 
 	clientset := fake.NewSimpleClientset(rs, pod1, pod2, unrelated)
 
-	analyzer := &RolloutAnalyzer{}
+	analyzer := &RolloutAnalyzer{config: DefaultAnalyzerConfig()}
 	ctx := context.Background()
 
 	pods, err := analyzer.podsForReplicaSet(ctx, clientset, rs)
@@ -421,7 +421,7 @@ func TestCollectEvents(t *testing.T) {
 	// Info event — should not appear (field selector won't filter in fake, but we test the logic)
 	clientset := fake.NewSimpleClientset(relatedEvent, unrelatedEvent)
 
-	analyzer := &RolloutAnalyzer{}
+	analyzer := &RolloutAnalyzer{config: DefaultAnalyzerConfig()}
 	ctx := context.Background()
 
 	events := analyzer.collectEvents(ctx, clientset, event)
@@ -449,7 +449,7 @@ func TestAsyncDiagnosticTarget_DropsWhenFull(t *testing.T) {
 	registry := NewClusterRegistry([]config.ClusterInfo{
 		{ID: "test-cluster", Name: "test-cluster", RestConfig: &rest.Config{Host: "https://localhost:6443"}},
 	})
-	analyzer := NewRolloutAnalyzer(registry)
+	analyzer := NewRolloutAnalyzer(registry, DefaultAnalyzerConfig())
 	target := NewAsyncDiagnosticTarget(analyzer, 1)
 	defer target.Stop()
 
@@ -479,7 +479,7 @@ func TestAsyncDiagnosticTarget_RejectsAfterStop(t *testing.T) {
 	registry := NewClusterRegistry([]config.ClusterInfo{
 		{ID: "test-cluster", Name: "test-cluster", RestConfig: &rest.Config{Host: "https://localhost:6443"}},
 	})
-	analyzer := NewRolloutAnalyzer(registry)
+	analyzer := NewRolloutAnalyzer(registry, DefaultAnalyzerConfig())
 	target := NewAsyncDiagnosticTarget(analyzer, 10)
 
 	target.Stop()
@@ -496,7 +496,7 @@ func TestAsyncDiagnosticTarget_StopDrainsInFlight(t *testing.T) {
 	registry := NewClusterRegistry([]config.ClusterInfo{
 		{ID: "test-cluster", Name: "test-cluster", RestConfig: &rest.Config{Host: "https://localhost:6443"}},
 	})
-	analyzer := NewRolloutAnalyzer(registry)
+	analyzer := NewRolloutAnalyzer(registry, DefaultAnalyzerConfig())
 	target := NewAsyncDiagnosticTarget(analyzer, 10)
 
 	// Dispatch an event — it will fail quickly (fake clientset from registry)
