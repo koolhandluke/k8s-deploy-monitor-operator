@@ -31,6 +31,7 @@ func NewAsyncDiagnosticTarget(analyzer *RolloutAnalyzer, maxConcurrent int) *Asy
 	}
 }
 
+// Name returns the target identifier used for logging and dispatch routing.
 func (t *AsyncDiagnosticTarget) Name() string {
 	return "diagnostic"
 }
@@ -95,6 +96,8 @@ func (t *AsyncDiagnosticTarget) Stop() {
 	slog.Info("diagnostic target stopped")
 }
 
+// logReport emits structured log entries for a completed diagnostic report,
+// including detailed events, pod statuses, and log snippets for non-success results.
 func (t *AsyncDiagnosticTarget) logReport(report *DiagnosticReport) {
 	attrs := []any{
 		"deployment", report.Event.DeploymentKey(),

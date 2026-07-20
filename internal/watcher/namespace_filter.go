@@ -41,6 +41,7 @@ func (f *NamespaceFilter) Update(allow, deny []string) {
 	f.denylist = toSet(deny)
 }
 
+// toSet converts a string slice into a set represented as a map for O(1) lookups.
 func toSet(items []string) map[string]bool {
 	m := make(map[string]bool, len(items))
 	for _, item := range items {

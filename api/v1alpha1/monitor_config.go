@@ -19,6 +19,7 @@ type MonitorConfig struct {
 	Status MonitorConfigStatus `json:"status,omitempty"`
 }
 
+// MonitorConfigSpec defines the desired namespace filtering configuration.
 type MonitorConfigSpec struct {
 	// NamespaceAllowlist, if non-empty, restricts monitoring to only these namespaces.
 	// Takes precedence over NamespaceDenylist.
@@ -29,6 +30,7 @@ type MonitorConfigSpec struct {
 	NamespaceDenylist []string `json:"namespaceDenylist,omitempty"`
 }
 
+// MonitorConfigStatus defines the observed state of a MonitorConfig.
 type MonitorConfigStatus struct {
 	// Active indicates the config has been picked up by the monitor.
 	Active bool `json:"active,omitempty"`

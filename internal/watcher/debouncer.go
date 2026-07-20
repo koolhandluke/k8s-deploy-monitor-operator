@@ -20,6 +20,8 @@ type Debouncer struct {
 	out     chan<- models.RolloutEvent
 }
 
+// NewDebouncer creates a Debouncer that waits for the given window of inactivity
+// before forwarding events to the out channel.
 func NewDebouncer(window time.Duration, out chan<- models.RolloutEvent) *Debouncer {
 	return &Debouncer{
 		window:  window,
@@ -46,6 +48,8 @@ func (d *Debouncer) Submit(key string, event models.RolloutEvent) {
 	})
 }
 
+// emit sends the pending event for key to the output channel using a non-blocking
+// send, dropping the event with a warning if the channel is full.
 func (d *Debouncer) emit(key string) {
 	d.mu.Lock()
 	event, exists := d.pending[key]

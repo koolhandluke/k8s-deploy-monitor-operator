@@ -1,3 +1,6 @@
+// Package v1alpha1 contains CRD types for the deploy-monitor operator,
+// including ClusterRolloutState for persisted template hashes,
+// RolloutRecord for audit trails, and MonitorConfig for runtime configuration.
 package v1alpha1
 
 import (
@@ -20,6 +23,8 @@ type ClusterRolloutState struct {
 	Status ClusterRolloutStateStatus `json:"status,omitempty"`
 }
 
+// ClusterRolloutStateSpec defines the desired state of a ClusterRolloutState,
+// holding the cluster identifier and its deployment template hashes.
 type ClusterRolloutStateSpec struct {
 	// ClusterID is the unique identifier for the cluster.
 	ClusterID string `json:"clusterID"`
@@ -28,6 +33,7 @@ type ClusterRolloutStateSpec struct {
 	TemplateHashes map[string]string `json:"templateHashes,omitempty"`
 }
 
+// ClusterRolloutStateStatus defines the observed state of a ClusterRolloutState.
 type ClusterRolloutStateStatus struct {
 	// TrackedDeployments is the number of deployments being tracked.
 	TrackedDeployments int `json:"trackedDeployments,omitempty"`
@@ -62,6 +68,8 @@ type RolloutRecord struct {
 	Status RolloutRecordStatus `json:"status,omitempty"`
 }
 
+// RolloutRecordSpec defines the details of a detected rollout event,
+// including cluster, deployment, and template hash information.
 type RolloutRecordSpec struct {
 	// ClusterID is the unique identifier for the cluster.
 	ClusterID string `json:"clusterID"`
@@ -95,13 +103,20 @@ type RolloutRecordSpec struct {
 type RolloutPhase string
 
 const (
-	PhaseDetected     RolloutPhase = "Detected"
-	PhaseProcessing   RolloutPhase = "Processing"
-	PhaseDispatched   RolloutPhase = "Dispatched"
+	// PhaseDetected indicates the rollout was detected but not yet processed.
+	PhaseDetected RolloutPhase = "Detected"
+	// PhaseProcessing indicates the rollout event is being dispatched.
+	PhaseProcessing RolloutPhase = "Processing"
+	// PhaseDispatched indicates the rollout event was successfully sent to all targets.
+	PhaseDispatched RolloutPhase = "Dispatched"
+	// PhaseInvestigated indicates the rollout was analyzed by an investigation target.
 	PhaseInvestigated RolloutPhase = "Investigated"
-	PhaseFailed       RolloutPhase = "Failed"
+	// PhaseFailed indicates dispatch or investigation failed.
+	PhaseFailed RolloutPhase = "Failed"
 )
 
+// RolloutRecordStatus defines the observed state of a RolloutRecord,
+// tracking dispatch progress and any errors.
 type RolloutRecordStatus struct {
 	// Phase of the rollout processing.
 	// +kubebuilder:validation:Enum=Detected;Processing;Dispatched;Investigated;Failed

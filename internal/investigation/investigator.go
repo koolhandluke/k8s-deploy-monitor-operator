@@ -1,3 +1,6 @@
+// Package investigation provides rollout investigation backends and orchestration.
+// It defines the Investigator interface with built-in runbook and Holmes implementations,
+// an Orchestrator for concurrent investigation with supersede semantics, and a Slack reporter.
 package investigation
 
 import (

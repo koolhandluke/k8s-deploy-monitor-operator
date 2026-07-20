@@ -1,3 +1,6 @@
+// Package main implements the standalone rollout dispatcher service, which watches
+// RolloutRecord CRDs and dispatches notifications to configured targets independently
+// of the monitor process.
 package main
 
 import (
@@ -23,6 +26,8 @@ import (
 	"github.com/koolhandluke/k8s-deploy-monitor-operator/internal/dispatch"
 )
 
+// main loads configuration, initializes Kubernetes clients and dispatch targets,
+// starts the record watcher and TTL cleaner, and runs until a shutdown signal is received.
 func main() {
 	cfg, err := config.Load()
 	if err != nil {
@@ -99,6 +104,8 @@ func main() {
 	slog.Info("rollout dispatcher stopped")
 }
 
+// getRestConfig returns a Kubernetes REST config, trying in-cluster config first
+// and falling back to the KUBECONFIG env var or the default kubeconfig path.
 func getRestConfig(cfg *config.Config) (*rest.Config, error) {
 	// Try in-cluster first
 	restCfg, err := rest.InClusterConfig()
@@ -119,6 +126,8 @@ func getRestConfig(cfg *config.Config) (*rest.Config, error) {
 	return clientcmd.BuildConfigFromFlags("", kubeconfigPath)
 }
 
+// initClients creates a controller-runtime client and a dynamic client from
+// the given REST config, registering the CRD scheme types.
 func initClients(restCfg *rest.Config) (client.Client, dynamic.Interface, error) {
 	scheme := runtime.NewScheme()
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))

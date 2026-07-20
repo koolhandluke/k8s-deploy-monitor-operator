@@ -51,6 +51,7 @@ func (tc *TTLCleaner) Stop() {
 	close(tc.stopCh)
 }
 
+// cleanup lists terminal RolloutRecords and deletes those older than the configured TTL.
 func (tc *TTLCleaner) cleanup(ctx context.Context) {
 	list, err := tc.dynClient.Resource(rolloutRecordGVR).Namespace(tc.namespace).
 		List(ctx, metav1ListOptions())

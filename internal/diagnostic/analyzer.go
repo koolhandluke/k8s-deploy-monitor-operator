@@ -75,6 +75,8 @@ type progressState struct {
 	lastProgressAt  time.Time
 }
 
+// recordProgress updates the progress tracking state and resets the last progress
+// timestamp when forward movement is detected in replica counts.
 func (p *progressState) recordProgress(updated, available, unavailable int32, now time.Time) {
 	if updated > p.lastUpdated || available > p.lastAvailable || unavailable < p.lastUnavailable {
 		p.lastProgressAt = now
@@ -447,6 +449,8 @@ func (a *RolloutAnalyzer) collectContainerLogs(
 	}
 }
 
+// fetchLogs retrieves container logs from the Kubernetes API and filters them
+// for error patterns. Returns nil if no matching lines are found.
 func (a *RolloutAnalyzer) fetchLogs(
 	ctx context.Context,
 	clientset kubernetes.Interface,
@@ -612,6 +616,7 @@ func filterErrorLines(data []byte) []string {
 	return result
 }
 
+// countLines returns the number of newline-delimited lines in data.
 func countLines(data []byte) int {
 	n := 0
 	scanner := bufio.NewScanner(bytes.NewReader(data))

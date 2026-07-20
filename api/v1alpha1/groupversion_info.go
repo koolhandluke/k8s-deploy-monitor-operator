@@ -16,6 +16,7 @@ var (
 	AddToScheme = SchemeBuilder.AddToScheme
 )
 
+// init registers all CRD types with the scheme builder.
 func init() {
 	SchemeBuilder.Register(
 		&ClusterRolloutState{},

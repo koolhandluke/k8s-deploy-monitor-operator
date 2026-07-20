@@ -18,6 +18,7 @@ type SlackTarget struct {
 	client     *http.Client
 }
 
+// NewSlackTarget creates a SlackTarget that posts rollout notifications to the given webhook URL.
 func NewSlackTarget(webhookURL string, client *http.Client) *SlackTarget {
 	return &SlackTarget{
 		webhookURL: webhookURL,
@@ -25,12 +26,15 @@ func NewSlackTarget(webhookURL string, client *http.Client) *SlackTarget {
 	}
 }
 
+// Name returns the target identifier "slack".
 func (s *SlackTarget) Name() string { return "slack" }
 
+// slackMessage is the JSON payload sent to a Slack incoming webhook.
 type slackMessage struct {
 	Text string `json:"text"`
 }
 
+// Dispatch sends a formatted rollout notification to the configured Slack webhook.
 func (s *SlackTarget) Dispatch(ctx context.Context, event models.RolloutEvent) error {
 	text := fmt.Sprintf(
 		"*Rollout detected:* `%s` (`%s`) on *%s*\n%s → %s",

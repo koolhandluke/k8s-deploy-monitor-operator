@@ -19,6 +19,7 @@ type HolmesTarget struct {
 	client *http.Client
 }
 
+// NewHolmesTarget creates a HolmesTarget that posts rollout events to the given Holmes API URL.
 func NewHolmesTarget(apiURL string, client *http.Client) *HolmesTarget {
 	return &HolmesTarget{
 		apiURL: strings.TrimRight(apiURL, "/"),
@@ -26,12 +27,15 @@ func NewHolmesTarget(apiURL string, client *http.Client) *HolmesTarget {
 	}
 }
 
+// Name returns the target identifier "holmes".
 func (h *HolmesTarget) Name() string { return "holmes" }
 
+// holmesChatRequest is the JSON payload sent to the Holmes /api/chat endpoint.
 type holmesChatRequest struct {
 	Ask string `json:"ask"`
 }
 
+// Dispatch sends the rollout event to Holmes for investigation, retrying once on failure.
 func (h *HolmesTarget) Dispatch(ctx context.Context, event models.RolloutEvent) error {
 	query := fmt.Sprintf(
 		"Deployment %s in namespace %s on cluster %s rolled out: %s -> %s. Analyse the rollout health.",

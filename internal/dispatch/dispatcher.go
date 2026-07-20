@@ -1,3 +1,4 @@
+// Package dispatch fans out rollout events to notification targets via a worker pool.
 package dispatch
 
 import (
@@ -23,6 +24,8 @@ type Dispatcher struct {
 	wg           sync.WaitGroup
 }
 
+// NewDispatcher creates a Dispatcher that reads events from eventCh and fans them to targets
+// using workerCount concurrent workers.
 func NewDispatcher(targets []Target, eventCh chan models.RolloutEvent, workerCount int) *Dispatcher {
 	return &Dispatcher{
 		eventCh: eventCh,
@@ -84,6 +87,7 @@ func (d *Dispatcher) DispatchEvent(ctx context.Context, event models.RolloutEven
 	return targetNames, dispatchErr
 }
 
+// worker reads events from eventCh and dispatches them until the channel closes or ctx is cancelled.
 func (d *Dispatcher) worker(ctx context.Context, id int) {
 	for {
 		select {
@@ -103,6 +107,7 @@ func (d *Dispatcher) worker(ctx context.Context, id int) {
 	}
 }
 
+// targetNames returns the names of all registered targets.
 func (d *Dispatcher) targetNames() []string {
 	names := make([]string, len(d.targets))
 	for i, t := range d.targets {

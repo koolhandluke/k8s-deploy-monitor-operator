@@ -155,6 +155,66 @@ On startup, the initial LIST seeds the cache with current hashes (baseline). No 
 
 **Staggered startup** spaces cluster watchers 1 second apart to avoid hammering the API server with simultaneous LIST calls across all clusters.
 
+### Resource Profile: SharedInformerFactory Watch per Cluster
+
+Each `ClusterWatcher` uses a `SharedInformerFactory` which maintains a long-lived HTTP/2 Watch stream to the API server. Steady-state cost per cluster:
+
+- **Goroutines (~2):** one Reflector goroutine (drives the List+Watch HTTP loop) and one controller/processor goroutine (drains the internal delta FIFO and calls `onAdd`/`onUpdate`/`onDelete`). Plus one transient goroutine per pending debouncer timer.
+- **TCP connections (1):** one persistent HTTP/2 watch stream per cluster. The informer watches all Deployments cluster-wide through this single connection — it is not per-namespace or per-deployment.
+- **Memory:** dominated by the informer's in-memory store — one full Deployment object per watched deployment, after `stripUnneededFields` strips `managedFields` and `last-applied-configuration`. Roughly 2–5 KB per deployment post-stripping; 1000 deployments ≈ 2–5 MB. The `templateCache` map (64-char SHA256 string per key) is negligible. Resync is disabled (`0`), so no periodic full re-LIST memory spikes.
+- **CPU:** essentially idle. The Watch connection blocks on the API server. CPU use comes only from deserializing events and computing `templateHash` (JSON marshal → SHA256), both trivially cheap.
+
+#### Scaling estimates
+
+| Clusters | Deployments (total) | Goroutines | TCP connections | Estimated memory (informer stores) |
+|---|---|---|---|---|
+| 10 | 2,000 | ~20 | 10 | ~10 MB |
+| 50 | 10,000 | ~100 | 50 | ~50 MB |
+| 100 | 20,000 | ~200 | 100 | ~100 MB |
+
+Memory is the binding constraint. The deployed limit of 128Mi is workable up to ~50 clusters with typical deployment counts. Beyond that, raise the memory limit or shard watchers across replicas.
+
+#### How field stripping affects memory
+
+`stripUnneededFields` removes `managedFields` and `last-applied-configuration` via the informer's `WithTransform` option. Published benchmarks show this reduces per-object memory by 26–50%:
+
+- Red Hat documented an operator going from 36 MiB to 14 MiB under load after adding `SetTransform` to strip unused fields ([source](https://developers.redhat.com/articles/2026/06/01/protect-your-kubernetes-operator-oomkill)).
+- Kubernetes upstream benchmarks on 50,000 pods showed per-object memory dropping from 24.15 KB to 8.44 KB (65% reduction) when combining field stripping with string interning ([source](https://github.com/kubernetes/kubernetes/issues/137109)).
+- KubeVela explicitly drops `managedFields` and `last-applied-configuration` from their informer cache, citing these as the largest per-object overhead contributors ([source](https://www.cncf.io/blog/2023/04/12/stability-and-scalability-assessment-of-kubevela/)).
+
+#### Comparable systems at scale
+
+These numbers come from published benchmarks, not estimates:
+
+- **ArgoCD** (CNOE benchmark): 500 clusters / 50k apps on 3× m5.2xlarge nodes. At 10k apps the controller ran ~2,100–2,800 goroutines. Production rule of thumb: ~1 controller shard per 15–20 clusters ([source](https://cnoe.io/blog/argo-cd-application-scalability)).
+- **Karmada** (CNCF test): 100 clusters × 5,000 nodes × 20,000 pods. Per-cluster agent memory: 266 MiB for a 5,000-node cluster. CPU: 40 millicores ([source](https://www.cncf.io/blog/2022/11/29/support-for-100-large-scale-clusters/)).
+- **Rancher Fleet**: documented hard limit of 100,000 BundleDeployments (e.g., 150 bundles × 2,000 clusters) before a single controller becomes untenable ([source](https://fleet.rancher.io/tutorials/best-practices)).
+- **KubeVela**: memory scales linearly — 1 GB at 3k apps, 4 GB at 12k apps, 160 GB (5 replicas × 32 GB) at 400k apps ([source](https://www.cncf.io/blog/2023/04/12/stability-and-scalability-assessment-of-kubevela/)).
+
+#### Initial LIST cost
+
+The most expensive moment is startup. The informer issues a full LIST of all Deployments per cluster. With staggered startup (1s between clusters), 100 clusters takes ~100 seconds to reach full watch coverage. The LIST response loads all Deployment objects into memory at once. For clusters with thousands of Deployments and large annotation payloads, this can cause a transient memory spike.
+
+Kubernetes 1.27+ introduced WatchList (KEP-3157) which streams the initial sync instead of buffering it. In benchmarks, this reduced API server memory from 70–80 GB to 3 GB for concurrent 10× 1 GB LIST operations. Client-side benefits depend on the API server version ([source](https://kubernetes.io/blog/2025/05/09/kubernetes-v1-33-streaming-list-responses/)).
+
+### Error Handling and Retry
+
+**client-go Reflector (automatic, inside the informer):**
+
+- **Watch disconnect** (TCP reset, timeout): Reflector backs off exponentially (capped ~5 min), re-opens Watch from the last known `resourceVersion`. No data loss.
+- **410 Gone** (etcd compacted the requested `resourceVersion`): Reflector does a full re-LIST to obtain a fresh `resourceVersion`, then resumes Watch. `onAdd` re-seeds the `templateCache` with current state. Events during the gap are silently missed (see known gap below).
+- **401/403** (expired creds, RBAC revoked): Reflector still retries forever. The custom `SetWatchErrorHandler` (`informer.go:91`) logs these as permanent errors. Recovery happens when creds rotate on disk and `reconcileLoop` recycles the watcher with a fresh clientset.
+- **API server unreachable**: same exponential backoff; reconnects when the server returns.
+
+**Application layer (Manager / ClusterWatcher):**
+
+- **Initial cache sync failure**: `WaitForCacheSync` returns false → `Start()` returns an error. Manager logs it, skips that cluster, continues starting others.
+- **Kubeconfig removed**: `reconcileLoop` detects missing file hash → calls `Stop()`, removes watcher.
+- **Kubeconfig credentials rotated**: `reconcileLoop` detects changed file hash → stops old watcher, starts new one with fresh clientset. Re-seeds hashes from CRD if persistence is enabled.
+- **Event channel full**: Debouncer does a non-blocking send; a full queue drops the event with a warning log rather than blocking the informer goroutine.
+
+**Known gap:** On a 410-triggered re-LIST, intermediate rollout events that occurred between the old `resourceVersion` and the new LIST are missed. The `SeedHashes` + CRD persistence mechanism partially mitigates this across restarts (hash mismatch from persisted state triggers a rollout event), but within a running session a re-LIST resets the baseline silently.
+
 ### Debouncer
 
 Rapid template changes to the same deployment (e.g., multiple `kubectl apply` in quick succession) are coalesced. The debouncer holds events for 30 seconds per deployment key. Each new event for the same key resets the timer and replaces the pending event. Only the latest event is emitted when the timer expires.

@@ -1,3 +1,5 @@
+// Package watcher detects Kubernetes Deployment rollouts across one or more
+// clusters by watching spec.template hash changes via SharedInformerFactory.
 package watcher
 
 import (
@@ -19,10 +21,12 @@ type hashObserverAdapter struct {
 	store *persistence.HashStore
 }
 
+// OnHashUpdate forwards a template hash update to the backing HashStore.
 func (a *hashObserverAdapter) OnHashUpdate(clusterID, deployKey, hash string) {
 	a.store.BufferHash(clusterID, deployKey, hash)
 }
 
+// OnHashDelete forwards a template hash deletion to the backing HashStore.
 func (a *hashObserverAdapter) OnHashDelete(clusterID, deployKey string) {
 	a.store.RemoveHash(clusterID, deployKey)
 }
@@ -31,6 +35,8 @@ func (a *hashObserverAdapter) OnHashDelete(clusterID, deployKey string) {
 // Replaceable in tests with a function that returns fake clientsets.
 type ClientsetFactory func(*rest.Config) (kubernetes.Interface, error)
 
+// defaultClientsetFactory is the production ClientsetFactory that creates a
+// real Kubernetes clientset from a rest.Config.
 func defaultClientsetFactory(cfg *rest.Config) (kubernetes.Interface, error) {
 	return kubernetes.NewForConfig(cfg)
 }
@@ -50,6 +56,8 @@ type Manager struct {
 	observer   HashObserver
 }
 
+// NewManager creates a Manager that watches the given clusters for deployment
+// rollouts, debouncing events before sending them to eventCh.
 func NewManager(
 	nsFilter func(string) bool,
 	debounceWindow time.Duration,

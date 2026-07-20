@@ -1,3 +1,4 @@
+// Package models defines shared data types used across the rollout monitor pipeline.
 package models
 
 import "time"

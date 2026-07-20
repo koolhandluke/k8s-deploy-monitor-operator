@@ -16,6 +16,7 @@ import (
 	"github.com/koolhandluke/k8s-deploy-monitor-operator/internal/models"
 )
 
+// rolloutRecordGVR is the GroupVersionResource for RolloutRecord CRDs.
 var rolloutRecordGVR = schema.GroupVersionResource{
 	Group:    "deploy-monitor.io",
 	Version:  "v1alpha1",
@@ -75,6 +76,7 @@ func (rw *RecordWatcher) Stop() {
 	slog.Info("record watcher stopped")
 }
 
+// handleRecord processes a single RolloutRecord: claims it, dispatches the event, and updates status.
 func (rw *RecordWatcher) handleRecord(ctx context.Context, obj interface{}) {
 	u, ok := obj.(*unstructured.Unstructured)
 	if !ok {
@@ -133,6 +135,7 @@ func (rw *RecordWatcher) claimRecord(ctx context.Context, u *unstructured.Unstru
 	return true
 }
 
+// toRolloutEvent converts an unstructured RolloutRecord into a RolloutEvent.
 func (rw *RecordWatcher) toRolloutEvent(u *unstructured.Unstructured) models.RolloutEvent {
 	spec, _ := u.Object["spec"].(map[string]interface{})
 
@@ -152,6 +155,7 @@ func (rw *RecordWatcher) toRolloutEvent(u *unstructured.Unstructured) models.Rol
 	}
 }
 
+// updateRecordStatus sets the final phase, dispatch targets, and error on a RolloutRecord.
 func (rw *RecordWatcher) updateRecordStatus(ctx context.Context, name, ns string, targets []string, dispatchErr string) {
 	// Get the latest version
 	record, err := rw.dynClient.Resource(rolloutRecordGVR).Namespace(ns).Get(ctx, name, metav1GetOptions())
@@ -199,6 +203,7 @@ func (rw *RecordWatcher) recoverStuckRecords(ctx context.Context) {
 	}
 }
 
+// doRecoverStuck lists Processing records and resets any that exceed the stuck timeout to Detected.
 func (rw *RecordWatcher) doRecoverStuck(ctx context.Context) {
 	list, err := rw.dynClient.Resource(rolloutRecordGVR).Namespace(rw.namespace).
 		List(ctx, metav1ListOptions())
@@ -239,8 +244,7 @@ func (rw *RecordWatcher) doRecoverStuck(ctx context.Context) {
 	}
 }
 
-// Helper functions
-
+// getNestedString traverses nested maps in an Unstructured object and returns the string at the given path.
 func getNestedString(u *unstructured.Unstructured, fields ...string) string {
 	obj := u.Object
 	for i, f := range fields {
@@ -256,11 +260,13 @@ func getNestedString(u *unstructured.Unstructured, fields ...string) string {
 	return ""
 }
 
+// getStr returns the string value for key in m, or "" if missing or not a string.
 func getStr(m map[string]interface{}, key string) string {
 	s, _ := m[key].(string)
 	return s
 }
 
+// getStrSlice returns the []string value for key in m, converting from []interface{}.
 func getStrSlice(m map[string]interface{}, key string) []string {
 	v, ok := m[key].([]interface{})
 	if !ok {
@@ -275,6 +281,7 @@ func getStrSlice(m map[string]interface{}, key string) []string {
 	return out
 }
 
+// toInterfaceSlice converts a []string to []interface{} for use in unstructured objects.
 func toInterfaceSlice(ss []string) []interface{} {
 	out := make([]interface{}, len(ss))
 	for i, s := range ss {

@@ -17,10 +17,12 @@ func NewInvestigationTarget(orchestrator *Orchestrator) *InvestigationTarget {
 	return &InvestigationTarget{orchestrator: orchestrator}
 }
 
+// Name returns the target name used for logging and identification.
 func (t *InvestigationTarget) Name() string {
 	return "investigation"
 }
 
+// Dispatch starts an asynchronous investigation for the event and returns nil immediately.
 func (t *InvestigationTarget) Dispatch(_ context.Context, event models.RolloutEvent) error {
 	t.orchestrator.Investigate(event)
 	return nil

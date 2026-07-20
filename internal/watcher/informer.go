@@ -41,6 +41,8 @@ type ClusterWatcher struct {
 	hashObserver HashObserver
 }
 
+// NewClusterWatcher creates a watcher for a single cluster that detects
+// deployment rollouts by tracking spec.template hash changes.
 func NewClusterWatcher(
 	clusterID, clusterName string,
 	clientset kubernetes.Interface,

@@ -1,3 +1,5 @@
+// Package persistence provides batched CRD-based storage for deployment template
+// hashes and rollout audit records, using controller-runtime clients.
 package persistence
 
 import (
@@ -24,6 +26,7 @@ type HashStore struct {
 	mu            sync.Mutex
 }
 
+// NewHashStore creates a HashStore that persists template hashes to the given namespace.
 func NewHashStore(c client.Client, namespace string) *HashStore {
 	return &HashStore{
 		client:        c,
@@ -96,6 +99,8 @@ func (s *HashStore) FlushLoop(ctx context.Context, interval time.Duration) {
 	}
 }
 
+// flush drains all pending hash updates and writes them to their respective
+// ClusterRolloutState CRDs. Failed updates are re-queued for the next cycle.
 func (s *HashStore) flush(ctx context.Context) {
 	s.mu.Lock()
 	pending := s.pendingHashes
@@ -122,6 +127,8 @@ func (s *HashStore) flush(ctx context.Context) {
 	}
 }
 
+// upsertClusterState creates or updates the ClusterRolloutState CRD for the
+// given cluster, applying the provided hash updates and refreshing the status.
 func (s *HashStore) upsertClusterState(ctx context.Context, clusterID string, updates map[string]string) error {
 	name := sanitizeName(clusterID)
 	key := types.NamespacedName{Name: name, Namespace: s.namespace}
@@ -175,6 +182,8 @@ func (s *HashStore) upsertClusterState(ctx context.Context, clusterID string, up
 	return nil
 }
 
+// applyUpdates merges hash updates into a ClusterRolloutState. An empty value
+// signals deletion of the corresponding key.
 func applyUpdates(state *v1alpha1.ClusterRolloutState, updates map[string]string) {
 	for k, v := range updates {
 		if v == "" {

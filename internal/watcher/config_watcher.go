@@ -16,6 +16,7 @@ import (
 	v1alpha1 "github.com/koolhandluke/k8s-deploy-monitor-operator/api/v1alpha1"
 )
 
+// monitorConfigGVR is the GroupVersionResource for the MonitorConfig CRD.
 var monitorConfigGVR = schema.GroupVersionResource{
 	Group:    "deploy-monitor.io",
 	Version:  "v1alpha1",
@@ -72,6 +73,8 @@ func (cw *ConfigWatcher) Stop() {
 	slog.Info("config watcher stopped")
 }
 
+// initialSync loads the "default" MonitorConfig CRD and applies its namespace
+// filter settings. If no config exists, env var defaults remain in effect.
 func (cw *ConfigWatcher) initialSync(ctx context.Context) {
 	var mc v1alpha1.MonitorConfig
 	err := cw.client.Get(ctx, client.ObjectKey{Name: "default"}, &mc)
@@ -82,6 +85,8 @@ func (cw *ConfigWatcher) initialSync(ctx context.Context) {
 	cw.applyConfig(ctx, mc.Spec.NamespaceAllowlist, mc.Spec.NamespaceDenylist)
 }
 
+// handleConfigChange processes an add or update event for a MonitorConfig resource,
+// applying the namespace filter if the resource is named "default".
 func (cw *ConfigWatcher) handleConfigChange(ctx context.Context, obj interface{}) {
 	u, ok := obj.(*unstructured.Unstructured)
 	if !ok {
@@ -107,6 +112,8 @@ func (cw *ConfigWatcher) handleConfigChange(ctx context.Context, obj interface{}
 	cw.applyConfig(ctx, allowlist, denylist)
 }
 
+// applyConfig updates the NamespaceFilter with the given allow/deny lists and
+// writes an active status back to the MonitorConfig CRD.
 func (cw *ConfigWatcher) applyConfig(ctx context.Context, allowlist, denylist []string) {
 	cw.filter.Update(allowlist, denylist)
 
@@ -119,6 +126,8 @@ func (cw *ConfigWatcher) applyConfig(ctx context.Context, allowlist, denylist []
 	cw.updateStatus(ctx)
 }
 
+// updateStatus sets the MonitorConfig "default" status to active with the
+// current timestamp.
 func (cw *ConfigWatcher) updateStatus(ctx context.Context) {
 	var mc v1alpha1.MonitorConfig
 	err := cw.client.Get(ctx, client.ObjectKey{Name: "default"}, &mc)
@@ -136,6 +145,8 @@ func (cw *ConfigWatcher) updateStatus(ctx context.Context) {
 	}
 }
 
+// toStringSlice converts an unstructured interface{} value (expected to be
+// []interface{} of strings) into a []string, returning nil if the conversion fails.
 func toStringSlice(v interface{}) []string {
 	if v == nil {
 		return nil

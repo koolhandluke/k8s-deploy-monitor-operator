@@ -1,3 +1,6 @@
+// Package config loads and validates application configuration from environment
+// variables, including cluster credentials, namespace filtering, dispatch mode,
+// and persistence settings.
 package config
 
 import (
@@ -8,24 +11,33 @@ import (
 	"strings"
 )
 
+// DispatchMode controls which notification targets receive rollout events.
 type DispatchMode string
 
 const (
-	DispatchLog    DispatchMode = "log"
+	// DispatchLog sends events to structured log output only.
+	DispatchLog DispatchMode = "log"
+	// DispatchHolmes sends events to the Holmes API for AI-powered analysis.
 	DispatchHolmes DispatchMode = "holmes"
-	DispatchSlack  DispatchMode = "slack"
-	DispatchBoth   DispatchMode = "both"
+	// DispatchSlack sends events to a Slack webhook.
+	DispatchSlack DispatchMode = "slack"
+	// DispatchBoth sends events to both Holmes and Slack.
+	DispatchBoth DispatchMode = "both"
 )
 
 // InvestigationMode controls how rollout outcomes are investigated and reported.
 type InvestigationMode string
 
 const (
-	InvestigationNone    InvestigationMode = "none"
+	// InvestigationNone disables post-rollout investigation.
+	InvestigationNone InvestigationMode = "none"
+	// InvestigationRunbook runs the built-in diagnostic runbook and reports to Slack.
 	InvestigationRunbook InvestigationMode = "runbook"
-	InvestigationHolmes  InvestigationMode = "holmes"
+	// InvestigationHolmes delegates investigation to Holmes AI and reports to Slack.
+	InvestigationHolmes InvestigationMode = "holmes"
 )
 
+// Config holds all application settings loaded from environment variables.
 type Config struct {
 	// Cluster credentials
 	KubeconfigDir  string // directory of kubeconfig files (multi-cluster)
@@ -66,6 +78,8 @@ type Config struct {
 	Debug bool
 }
 
+// Load reads environment variables and returns a validated Config.
+// It returns an error if required variables are missing or values are invalid.
 func Load() (*Config, error) {
 	c := &Config{
 		KubeconfigDir:  os.Getenv("KUBECONFIG_DIR"),
@@ -185,6 +199,7 @@ func (c *Config) NamespaceAllowed(ns string) bool {
 	return true
 }
 
+// splitTrim splits a comma-separated string and trims whitespace from each element.
 func splitTrim(s string) []string {
 	parts := strings.Split(s, ",")
 	out := make([]string, 0, len(parts))
@@ -196,6 +211,7 @@ func splitTrim(s string) []string {
 	return out
 }
 
+// envInt reads an integer environment variable, returning defaultVal if unset or unparseable.
 func envInt(key string, defaultVal int) int {
 	v := os.Getenv(key)
 	if v == "" {

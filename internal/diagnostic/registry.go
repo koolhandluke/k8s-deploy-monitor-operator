@@ -1,3 +1,6 @@
+// Package diagnostic implements rollout analysis and diagnostics for Kubernetes deployments.
+// It monitors rollout progress, detects failures, and gathers diagnostic context
+// such as pod statuses, warning events, and container logs.
 package diagnostic
 
 import (

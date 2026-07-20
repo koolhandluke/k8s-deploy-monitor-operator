@@ -20,6 +20,7 @@ type AuditRecorder struct {
 	namespace string
 }
 
+// NewAuditRecorder creates an AuditRecorder that writes RolloutRecord CRDs to the given namespace.
 func NewAuditRecorder(c client.Client, namespace string) *AuditRecorder {
 	return &AuditRecorder{
 		client:    c,
@@ -98,6 +99,8 @@ func (r *AuditRecorder) UpdateRecordStatus(ctx context.Context, event models.Rol
 	}
 }
 
+// recordName builds a deterministic Kubernetes-safe resource name for a
+// RolloutRecord from the event's cluster, namespace, deployment, and timestamp.
 func recordName(event models.RolloutEvent) string {
 	name := fmt.Sprintf("%s-%s-%s-%d",
 		sanitizeName(event.ClusterID),

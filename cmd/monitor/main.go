@@ -1,3 +1,6 @@
+// Package main implements the rollout monitor service, which watches Kubernetes
+// Deployments across one or more clusters, detects rollouts via template hash
+// changes, and dispatches notifications through configured targets.
 package main
 
 import (
@@ -26,6 +29,8 @@ import (
 	"github.com/koolhandluke/k8s-deploy-monitor-operator/internal/watcher"
 )
 
+// main loads configuration, initializes cluster watchers and dispatch targets,
+// and runs until a SIGTERM or SIGINT signal is received.
 func main() {
 	cfg, err := config.Load()
 	if err != nil {
@@ -215,6 +220,8 @@ func main() {
 	slog.Info("rollout monitor stopped")
 }
 
+// initK8sClients creates a controller-runtime client and a dynamic client using
+// the REST config from the first configured cluster.
 func initK8sClients(clusters []config.ClusterInfo) (client.Client, dynamic.Interface, error) {
 	if len(clusters) == 0 {
 		return nil, nil, fmt.Errorf("no clusters configured")

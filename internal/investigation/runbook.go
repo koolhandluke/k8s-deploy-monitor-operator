@@ -17,6 +17,7 @@ func NewRunbookInvestigator(analyzer *diagnostic.RolloutAnalyzer) *RunbookInvest
 	return &RunbookInvestigator{analyzer: analyzer}
 }
 
+// Investigate runs the built-in rollout analyzer against the event and returns a diagnostic report.
 func (r *RunbookInvestigator) Investigate(ctx context.Context, event models.RolloutEvent) (*diagnostic.DiagnosticReport, error) {
 	return r.analyzer.Analyze(ctx, event)
 }

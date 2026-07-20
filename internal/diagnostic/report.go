@@ -10,13 +10,20 @@ import (
 type Result string
 
 const (
-	ResultSuccess      Result = "SUCCESS"
-	ResultFailed       Result = "FAILED"
-	ResultStalled      Result = "STALLED"
+	// ResultSuccess indicates the rollout completed and passed the soak period.
+	ResultSuccess Result = "SUCCESS"
+	// ResultFailed indicates the rollout hit a definitive failure condition.
+	ResultFailed Result = "FAILED"
+	// ResultStalled indicates the rollout stopped making forward progress.
+	ResultStalled Result = "STALLED"
+	// ResultInconclusive indicates the analysis could not determine a clear outcome.
 	ResultInconclusive Result = "INCONCLUSIVE"
-	ResultUnstable     Result = "UNSTABLE"
-	ResultPaused       Result = "PAUSED"
-	ResultDeleted      Result = "DELETED"
+	// ResultUnstable indicates the rollout converged but regressed during the soak period.
+	ResultUnstable Result = "UNSTABLE"
+	// ResultPaused indicates the deployment was paused when the analysis timed out.
+	ResultPaused Result = "PAUSED"
+	// ResultDeleted indicates the deployment was deleted during analysis.
+	ResultDeleted Result = "DELETED"
 )
 
 // DiagnosticReport is the output of a rollout analysis.

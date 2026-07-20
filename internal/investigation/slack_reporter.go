@@ -12,6 +12,7 @@ import (
 	"github.com/koolhandluke/k8s-deploy-monitor-operator/internal/diagnostic"
 )
 
+// maxLogChars is the maximum number of characters to include from container logs in a Slack message.
 const maxLogChars = 3000
 
 // SlackReporter posts investigation results to Slack using Block Kit formatting.
@@ -28,6 +29,7 @@ func NewSlackReporter(webhookURL string, client *http.Client) *SlackReporter {
 	}
 }
 
+// PostReport sends a formatted investigation report to the configured Slack webhook.
 func (s *SlackReporter) PostReport(ctx context.Context, report *diagnostic.DiagnosticReport) error {
 	var payload map[string]interface{}
 
@@ -65,6 +67,7 @@ func (s *SlackReporter) PostReport(ctx context.Context, report *diagnostic.Diagn
 	return nil
 }
 
+// successMessage builds a simple Slack text payload for a successful rollout.
 func (s *SlackReporter) successMessage(report *diagnostic.DiagnosticReport) map[string]interface{} {
 	text := fmt.Sprintf(":white_check_mark: Rollout *SUCCESS*: `%s` (`%s`) on *%s* — completed in %s",
 		report.Event.DeploymentName,
@@ -77,6 +80,7 @@ func (s *SlackReporter) successMessage(report *diagnostic.DiagnosticReport) map[
 	}
 }
 
+// failureMessage builds a detailed Slack Block Kit payload for a failed or degraded rollout.
 func (s *SlackReporter) failureMessage(report *diagnostic.DiagnosticReport) map[string]interface{} {
 	blocks := []interface{}{}
 
@@ -158,6 +162,7 @@ func (s *SlackReporter) failureMessage(report *diagnostic.DiagnosticReport) map[
 	}
 }
 
+// resultEmoji returns a Slack emoji string corresponding to the diagnostic result.
 func resultEmoji(r diagnostic.Result) string {
 	switch r {
 	case diagnostic.ResultFailed:
@@ -177,6 +182,7 @@ func resultEmoji(r diagnostic.Result) string {
 	}
 }
 
+// block builds a Slack block of the given type with the provided text content.
 func block(blockType, text string) map[string]interface{} {
 	if blockType == "header" {
 		return map[string]interface{}{
@@ -190,6 +196,7 @@ func block(blockType, text string) map[string]interface{} {
 	return sectionBlock(text)
 }
 
+// sectionBlock builds a Slack section block with mrkdwn-formatted text.
 func sectionBlock(text string) map[string]interface{} {
 	return map[string]interface{}{
 		"type": "section",
@@ -200,6 +207,7 @@ func sectionBlock(text string) map[string]interface{} {
 	}
 }
 
+// divider builds a Slack divider block.
 func divider() map[string]interface{} {
 	return map[string]interface{}{
 		"type": "divider",

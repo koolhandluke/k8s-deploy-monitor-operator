@@ -29,14 +29,17 @@ func NewHolmesInvestigator(apiURL string, client *http.Client) *HolmesInvestigat
 	}
 }
 
+// holmesChatRequest is the JSON request body sent to the Holmes /api/chat endpoint.
 type holmesChatRequest struct {
 	Ask string `json:"ask"`
 }
 
+// holmesChatResponse is the JSON response body returned by the Holmes /api/chat endpoint.
 type holmesChatResponse struct {
 	Analysis string `json:"analysis"`
 }
 
+// Investigate sends a rollout event to the Holmes API and maps the response to a DiagnosticReport.
 func (h *HolmesInvestigator) Investigate(ctx context.Context, event models.RolloutEvent) (*diagnostic.DiagnosticReport, error) {
 	start := time.Now()
 
