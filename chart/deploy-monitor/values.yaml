@@ -39,6 +39,14 @@ serviceAccount:
 namespace:
   create: false
 
+logging:
+  debug: false
+  trace: false  # investigation pipeline detail (implies debug)
+
+investigation:
+  mode: none       # none | runbook | holmes
+  maxConcurrent: 10
+
 dispatcher:
   enabled: false   # opt-in, existing users unaffected
   replicas: 1

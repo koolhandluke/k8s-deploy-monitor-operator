@@ -56,5 +56,19 @@ spec:
             - name: PERSISTENCE_NAMESPACE
               value: {{ default .Release.Namespace .Values.persistence.namespace | quote }}
             {{- end }}
+            {{- if .Values.logging.debug }}
+            - name: DEBUG
+              value: "true"
+            {{- end }}
+            {{- if .Values.logging.trace }}
+            - name: TRACE
+              value: "true"
+            {{- end }}
+            {{- if ne .Values.investigation.mode "none" }}
+            - name: INVESTIGATION_MODE
+              value: {{ .Values.investigation.mode | quote }}
+            - name: INVESTIGATION_MAX_CONCURRENT
+              value: {{ .Values.investigation.maxConcurrent | quote }}
+            {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
