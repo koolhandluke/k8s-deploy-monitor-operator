@@ -40,8 +40,7 @@ const (
 // Config holds all application settings loaded from environment variables.
 type Config struct {
 	// Cluster credentials
-	KubeconfigDir  string // directory of kubeconfig files (multi-cluster)
-	KubeconfigPath string // single kubeconfig file (local dev mode)
+	KubeconfigDir string // directory of kubeconfig files (multi-cluster)
 
 	// Namespace filtering
 	NamespaceAllowlist []string
@@ -53,10 +52,11 @@ type Config struct {
 	SlackWebhookURL string
 
 	// Tuning
-	WorkerCount          int
-	DebounceSeconds      int
-	QueueMaxSize         int
-	RescanIntervalSeconds int
+	WorkerCount                int
+	DebounceSeconds            int
+	QueueMaxSize               int
+	RescanIntervalSeconds      int
+	WatcherStartTimeoutSeconds int
 
 	// Persistence
 	PersistenceEnabled   bool
@@ -85,7 +85,6 @@ type Config struct {
 func Load() (*Config, error) {
 	c := &Config{
 		KubeconfigDir:  os.Getenv("KUBECONFIG_DIR"),
-		KubeconfigPath: os.Getenv("KUBECONFIG"),
 		HolmesAPIURL:   os.Getenv("HOLMES_API_URL"),
 		SlackWebhookURL: os.Getenv("SLACK_WEBHOOK_URL"),
 	}
@@ -126,6 +125,7 @@ func Load() (*Config, error) {
 	c.DebounceSeconds = envInt("DEBOUNCE_SECONDS", 30)
 	c.QueueMaxSize = envInt("QUEUE_MAX_SIZE", 100)
 	c.RescanIntervalSeconds = envInt("RESCAN_INTERVAL_SECONDS", 600)
+	c.WatcherStartTimeoutSeconds = envInt("WATCHER_START_TIMEOUT_SECONDS", 30)
 
 	// Diagnostic (legacy)
 	c.DiagnosticEnabled = strings.ToLower(os.Getenv("DIAGNOSTIC_ENABLED")) == "true"

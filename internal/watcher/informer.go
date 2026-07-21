@@ -7,11 +7,12 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
@@ -39,6 +40,13 @@ type ClusterWatcher struct {
 	cancel        context.CancelFunc
 
 	hashObserver HashObserver
+	startTimeout time.Duration
+
+	// Health monitoring
+	consecutiveErrors int64        // atomic, incremented by watch error handler
+	lastSuccessTime   atomic.Value // time.Time, updated on every event handler call
+	lastWatchError    atomic.Value // error, set by watch error handler
+	permanent         atomic.Bool  // true if 401/403 detected
 }
 
 // NewClusterWatcher creates a watcher for a single cluster that detects
@@ -49,6 +57,7 @@ func NewClusterWatcher(
 	debouncer *Debouncer,
 	nsFilter func(string) bool,
 	hashObserver HashObserver,
+	startTimeout time.Duration,
 ) *ClusterWatcher {
 	return &ClusterWatcher{
 		clusterID:     clusterID,
@@ -58,6 +67,7 @@ func NewClusterWatcher(
 		nsFilter:      nsFilter,
 		templateCache: make(map[string]string),
 		hashObserver:  hashObserver,
+		startTimeout:  startTimeout,
 	}
 }
 
@@ -91,7 +101,10 @@ func (w *ClusterWatcher) Start(ctx context.Context) error {
 
 	// Step 3: Set watch error handler BEFORE starting
 	deployInformer.SetWatchErrorHandler(func(r *cache.Reflector, err error) {
-		if errors.IsUnauthorized(err) || errors.IsForbidden(err) {
+		atomic.AddInt64(&w.consecutiveErrors, 1)
+		w.lastWatchError.Store(err)
+		if apierrors.IsUnauthorized(err) || apierrors.IsForbidden(err) {
+			w.permanent.Store(true)
 			slog.Error("permanent watch error — credentials invalid",
 				"cluster", w.clusterID, "error", err)
 		} else {
@@ -113,9 +126,15 @@ func (w *ClusterWatcher) Start(ctx context.Context) error {
 	// Step 5: Start (non-blocking)
 	w.factory.Start(ctx.Done())
 
-	// Step 6: Wait for cache sync
-	if !cache.WaitForCacheSync(ctx.Done(), deployInformer.HasSynced) {
-		return fmt.Errorf("cache sync failed for cluster %s", w.clusterID)
+	// Step 6: Wait for cache sync with timeout
+	syncCtx := ctx
+	if w.startTimeout > 0 {
+		var syncCancel context.CancelFunc
+		syncCtx, syncCancel = context.WithTimeout(ctx, w.startTimeout)
+		defer syncCancel()
+	}
+	if !cache.WaitForCacheSync(syncCtx.Done(), deployInformer.HasSynced) {
+		return fmt.Errorf("cache sync timed out for cluster %s", w.clusterID)
 	}
 
 	slog.Info("cluster watcher started", "cluster", w.clusterID)
@@ -132,8 +151,28 @@ func (w *ClusterWatcher) Stop() {
 	}
 }
 
+// HealthStatus returns the health state of the watcher.
+// Unhealthy if consecutiveErrors >= 5 or a permanent auth error was detected.
+func (w *ClusterWatcher) HealthStatus() (healthy bool, permanentErr bool, lastErr error) {
+	perm := w.permanent.Load()
+	errs := atomic.LoadInt64(&w.consecutiveErrors)
+	var lastE error
+	if v := w.lastWatchError.Load(); v != nil {
+		lastE = v.(error)
+	}
+	return errs < 5 && !perm, perm, lastE
+}
+
+// resetHealthCounters resets the consecutive error counter and updates lastSuccessTime.
+func (w *ClusterWatcher) resetHealthCounters() {
+	atomic.StoreInt64(&w.consecutiveErrors, 0)
+	w.lastSuccessTime.Store(time.Now())
+}
+
 // onAdd seeds the template cache on initial LIST (baseline — not a rollout).
 func (w *ClusterWatcher) onAdd(obj interface{}) {
+	w.resetHealthCounters()
+
 	deploy, ok := obj.(*appsv1.Deployment)
 	if !ok {
 		return
@@ -157,6 +196,8 @@ func (w *ClusterWatcher) onAdd(obj interface{}) {
 
 // onUpdate detects rollouts by comparing spec.template hashes.
 func (w *ClusterWatcher) onUpdate(oldObj, newObj interface{}) {
+	w.resetHealthCounters()
+
 	newDeploy, ok := newObj.(*appsv1.Deployment)
 	if !ok {
 		return
@@ -221,6 +262,8 @@ func (w *ClusterWatcher) onUpdate(oldObj, newObj interface{}) {
 
 // onDelete removes the deployment from the template cache to prevent unbounded growth.
 func (w *ClusterWatcher) onDelete(obj interface{}) {
+	w.resetHealthCounters()
+
 	// Unwrap tombstones
 	if d, ok := obj.(cache.DeletedFinalStateUnknown); ok {
 		obj = d.Obj

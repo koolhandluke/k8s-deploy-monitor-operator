@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 go build ./...                              # build all packages
-go run ./cmd/monitor                        # run locally (uses ~/.kube/config current context)
+KUBECONFIG_DIR=./kubeconfigs go run ./cmd/monitor  # run locally (requires kubeconfig directory)
 go test ./...                               # all tests
 go test ./internal/watcher/ -run TestClusterWatcher_DetectsRollout -v   # single test
 go test ./... -race                         # race detector (concurrent maps + timers make this worth running)
@@ -32,13 +32,15 @@ kubeconfigs → Manager → ClusterWatcher (1 per cluster) → Debouncer → eve
                             ConfigWatcher ← MonitorConfig CRD
 ```
 
-- **[internal/config/](internal/config/)** — env-var config plus cluster loading. Cluster source
-  priority: `KUBECONFIG_DIR` (one file per cluster, multi-cluster) > `KUBECONFIG` (single) >
-  default kubeconfig.
+- **[internal/config/](internal/config/)** — env-var config plus cluster loading. `KUBECONFIG_DIR`
+  is required (one file per cluster, multi-cluster).
 - **[internal/watcher/](internal/watcher/)** — `Manager` starts one `ClusterWatcher` per cluster,
   staggered 1s apart. Each watcher runs a `SharedInformerFactory` on Deployments with resync
-  disabled. Also contains `NamespaceFilter` (thread-safe, runtime-updatable allow/deny filter)
-  and `ConfigWatcher` (watches `MonitorConfig` CRD to hot-reload namespace filtering).
+  disabled. Failed clusters are queued for retry with exponential backoff (10s→5m cap).
+  The reconcile loop health-checks running watchers (consecutive errors, permanent auth
+  failures) and retries pending clusters. Also contains `NamespaceFilter` (thread-safe,
+  runtime-updatable allow/deny filter) and `ConfigWatcher` (watches `MonitorConfig` CRD to
+  hot-reload namespace filtering).
 - **[internal/dispatch/](internal/dispatch/)** — `Dispatcher` fans events to `Target`
   implementations via a worker pool. `LogTarget` is always registered; `AuditTarget` is added
   when persistence is enabled; Holmes and Slack are added based on `DISPATCH_MODE`.
@@ -74,8 +76,7 @@ blocking the watcher. Queue depth is `QUEUE_MAX_SIZE` (default 100).
 
 | Var | Default | Notes |
 | --- | --- | --- |
-| `KUBECONFIG_DIR` | — | dir of `.yaml`/`.yml`/`.conf` files; filename stem becomes cluster ID |
-| `KUBECONFIG` | — | single kubeconfig; uses current context |
+| `KUBECONFIG_DIR` | — | **required**; dir of `.yaml`/`.yml`/`.conf` files; filename stem becomes cluster ID |
 | `DISPATCH_MODE` | `log` | `log`\|`holmes`\|`slack`\|`both`; invalid values fail startup |
 | `HOLMES_API_URL` | — | required for `holmes`/`both`; posts to `/api/chat` |
 | `SLACK_WEBHOOK_URL` | — | required for `slack`/`both` |
@@ -85,6 +86,7 @@ blocking the watcher. Queue depth is `QUEUE_MAX_SIZE` (default 100).
 | `DEBOUNCE_SECONDS` | 30 | |
 | `QUEUE_MAX_SIZE` | 100 | |
 | `RESCAN_INTERVAL_SECONDS` | 600 | how often to re-read `KUBECONFIG_DIR` for added/changed/removed clusters |
+| `WATCHER_START_TIMEOUT_SECONDS` | 30 | timeout for initial cache sync per cluster; prevents hanging on unreachable clusters |
 | `PERSISTENCE_ENABLED` | `false` | enable CRD-based hash persistence and audit recording |
 | `PERSISTENCE_NAMESPACE` | `rollout-monitor` | namespace for `ClusterRolloutState` and `RolloutRecord` CRDs |
 | `DEBUG` | `false` | set to `true` for debug-level logging |

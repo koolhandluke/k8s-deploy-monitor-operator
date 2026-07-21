@@ -48,6 +48,11 @@ func main() {
 	}
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel})))
 
+	if cfg.KubeconfigDir == "" {
+		slog.Error("KUBECONFIG_DIR is required")
+		os.Exit(1)
+	}
+
 	clusters, err := config.LoadClusters(cfg)
 	if err != nil {
 		slog.Error("failed to load cluster configs", "error", err)
@@ -211,6 +216,7 @@ func main() {
 		hashStore,
 		cfg.KubeconfigDir,
 		time.Duration(cfg.RescanIntervalSeconds)*time.Second,
+		time.Duration(cfg.WatcherStartTimeoutSeconds)*time.Second,
 	)
 
 	if err := manager.Start(ctx, clusters); err != nil {

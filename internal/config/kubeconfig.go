@@ -19,13 +19,13 @@ type ClusterInfo struct {
 	RestConfig *rest.Config
 }
 
-// LoadClusters returns cluster configs based on the Config.
-// Priority: KUBECONFIG_DIR (multi-cluster) > KUBECONFIG (single) > default kubeconfig.
+// LoadClusters returns cluster configs from the KUBECONFIG_DIR directory.
+// Returns an error if KubeconfigDir is empty.
 func LoadClusters(cfg *Config) ([]ClusterInfo, error) {
-	if cfg.KubeconfigDir != "" {
-		return loadFromDirectory(cfg.KubeconfigDir)
+	if cfg.KubeconfigDir == "" {
+		return nil, fmt.Errorf("KUBECONFIG_DIR is required")
 	}
-	return loadFromKubeconfig(cfg.KubeconfigPath)
+	return loadFromDirectory(cfg.KubeconfigDir)
 }
 
 // loadFromDirectory reads one kubeconfig file per cluster from a directory.
@@ -72,42 +72,6 @@ func loadFromDirectory(dir string) ([]ClusterInfo, error) {
 
 	slog.Info("loaded clusters from directory", "dir", dir, "count", len(clusters))
 	return clusters, nil
-}
-
-// loadFromKubeconfig loads from a single kubeconfig file (or default location).
-// Uses the current context.
-func loadFromKubeconfig(kubeconfigPath string) ([]ClusterInfo, error) {
-	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
-	if kubeconfigPath != "" {
-		loadingRules.ExplicitPath = kubeconfigPath
-	}
-
-	configOverrides := &clientcmd.ConfigOverrides{}
-	kubeConfig := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, configOverrides)
-
-	rawConfig, err := kubeConfig.RawConfig()
-	if err != nil {
-		return nil, fmt.Errorf("loading kubeconfig: %w", err)
-	}
-
-	contextName := rawConfig.CurrentContext
-	if contextName == "" {
-		return nil, fmt.Errorf("no current context set in kubeconfig")
-	}
-
-	restCfg, err := kubeConfig.ClientConfig()
-	if err != nil {
-		return nil, fmt.Errorf("building rest config for context %s: %w", contextName, err)
-	}
-
-	slog.Info("loaded single cluster from kubeconfig", "context", contextName)
-	return []ClusterInfo{
-		{
-			ID:         contextName,
-			Name:       contextName,
-			RestConfig: restCfg,
-		},
-	}, nil
 }
 
 // ClusterSnapshot holds clusters and file content hashes from a directory scan.

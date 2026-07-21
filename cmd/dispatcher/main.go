@@ -102,7 +102,7 @@ func main() {
 
 // getRestConfig returns a Kubernetes REST config, trying in-cluster config first
 // and falling back to the KUBECONFIG env var or the default kubeconfig path.
-func getRestConfig(cfg *config.Config) (*rest.Config, error) {
+func getRestConfig(_ *config.Config) (*rest.Config, error) {
 	// Try in-cluster first
 	restCfg, err := rest.InClusterConfig()
 	if err == nil {
@@ -110,10 +110,7 @@ func getRestConfig(cfg *config.Config) (*rest.Config, error) {
 	}
 
 	// Fall back to KUBECONFIG for local dev
-	kubeconfigPath := cfg.KubeconfigPath
-	if kubeconfigPath == "" {
-		kubeconfigPath = os.Getenv("KUBECONFIG")
-	}
+	kubeconfigPath := os.Getenv("KUBECONFIG")
 	if kubeconfigPath == "" {
 		home, _ := os.UserHomeDir()
 		kubeconfigPath = home + "/.kube/config"
