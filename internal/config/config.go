@@ -75,8 +75,9 @@ type Config struct {
 	InvestigationMaxConcurrent int
 
 	// Logging
-	Debug bool
-	Trace bool
+	Debug         bool
+	Trace         bool
+	StatusAPIPort int
 }
 
 // Load reads environment variables and returns a validated Config.
@@ -170,6 +171,7 @@ func Load() (*Config, error) {
 	// Logging
 	c.Debug = strings.ToLower(os.Getenv("DEBUG")) == "true"
 	c.Trace = strings.ToLower(os.Getenv("TRACE")) == "true"
+	c.StatusAPIPort = envInt("STATUS_API_PORT", 8081)
 
 	// Persistence
 	c.PersistenceEnabled = strings.ToLower(os.Getenv("PERSISTENCE_ENABLED")) == "true"

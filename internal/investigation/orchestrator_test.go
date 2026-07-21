@@ -66,7 +66,7 @@ func testRolloutEvent(name string) models.RolloutEvent {
 func TestOrchestrator_HappyPath(t *testing.T) {
 	inv := &fakeInvestigator{delay: 1 * time.Millisecond, result: diagnostic.ResultSuccess}
 	reporter := &fakeReporter{}
-	orch := NewOrchestrator(inv, reporter, 10)
+	orch := NewOrchestrator(inv, reporter, 10, nil)
 	defer orch.Stop()
 
 	orch.Investigate(testRolloutEvent("myapp"))
@@ -87,7 +87,7 @@ func TestOrchestrator_SupersedeCancellation(t *testing.T) {
 	// Investigator that blocks until context is cancelled (simulates long investigation)
 	inv := &fakeInvestigator{delay: 5 * time.Second, result: diagnostic.ResultFailed}
 	reporter := &fakeReporter{}
-	orch := NewOrchestrator(inv, reporter, 10)
+	orch := NewOrchestrator(inv, reporter, 10, nil)
 	defer orch.Stop()
 
 	// Start first investigation (will block for 5s)
@@ -113,7 +113,7 @@ func TestOrchestrator_SupersedeCancellation(t *testing.T) {
 func TestOrchestrator_ConcurrencyLimit(t *testing.T) {
 	inv := &fakeInvestigator{delay: 100 * time.Millisecond, result: diagnostic.ResultSuccess}
 	reporter := &fakeReporter{}
-	orch := NewOrchestrator(inv, reporter, 2)
+	orch := NewOrchestrator(inv, reporter, 2, nil)
 	defer orch.Stop()
 
 	// Start 3 investigations for different deployments; third should be dropped
@@ -135,7 +135,7 @@ func TestOrchestrator_ConcurrencyLimit(t *testing.T) {
 func TestOrchestrator_StopDrains(t *testing.T) {
 	inv := &fakeInvestigator{delay: 50 * time.Millisecond, result: diagnostic.ResultSuccess}
 	reporter := &fakeReporter{}
-	orch := NewOrchestrator(inv, reporter, 10)
+	orch := NewOrchestrator(inv, reporter, 10, nil)
 
 	orch.Investigate(testRolloutEvent("myapp"))
 
@@ -155,7 +155,7 @@ func TestOrchestrator_StopDrains(t *testing.T) {
 
 func TestOrchestrator_RejectsAfterStop(t *testing.T) {
 	inv := &fakeInvestigator{delay: 1 * time.Millisecond, result: diagnostic.ResultSuccess}
-	orch := NewOrchestrator(inv, nil, 10)
+	orch := NewOrchestrator(inv, nil, 10, nil)
 	orch.Stop()
 
 	// Should not panic or block
@@ -164,7 +164,7 @@ func TestOrchestrator_RejectsAfterStop(t *testing.T) {
 
 func TestOrchestrator_NilReporter(t *testing.T) {
 	inv := &fakeInvestigator{delay: 1 * time.Millisecond, result: diagnostic.ResultSuccess}
-	orch := NewOrchestrator(inv, nil, 10)
+	orch := NewOrchestrator(inv, nil, 10, nil)
 	defer orch.Stop()
 
 	// Should not panic when reporter is nil

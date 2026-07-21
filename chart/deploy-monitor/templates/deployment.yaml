@@ -63,6 +63,8 @@ spec:
             {{- if .Values.logging.trace }}
             - name: TRACE
               value: "true"
+            - name: STATUS_API_PORT
+              value: {{ .Values.logging.statusAPIPort | default 8081 | quote }}
             {{- end }}
             {{- if ne .Values.investigation.mode "none" }}
             - name: INVESTIGATION_MODE
@@ -70,5 +72,11 @@ spec:
             - name: INVESTIGATION_MAX_CONCURRENT
               value: {{ .Values.investigation.maxConcurrent | quote }}
             {{- end }}
+          {{- if .Values.logging.trace }}
+          ports:
+            - name: status-api
+              containerPort: {{ .Values.logging.statusAPIPort | default 8081 }}
+              protocol: TCP
+          {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}

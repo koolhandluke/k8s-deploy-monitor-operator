@@ -42,6 +42,7 @@ namespace:
 logging:
   debug: false
   trace: false  # investigation pipeline detail (implies debug)
+  statusAPIPort: 8081  # only active when trace=true
 
 investigation:
   mode: none       # none | runbook | holmes

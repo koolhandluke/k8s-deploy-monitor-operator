@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/koolhandluke/k8s-deploy-monitor-operator/internal/diagnostic"
 	"github.com/koolhandluke/k8s-deploy-monitor-operator/internal/models"
@@ -20,6 +21,7 @@ type Reporter interface {
 type Orchestrator struct {
 	investigator Investigator
 	reporter     Reporter
+	statusCache  *StatusCache
 
 	mu     sync.Mutex
 	active map[string]context.CancelFunc // deploymentKey → cancel
@@ -32,11 +34,13 @@ type Orchestrator struct {
 }
 
 // NewOrchestrator creates an orchestrator with bounded concurrency.
-func NewOrchestrator(investigator Investigator, reporter Reporter, maxConcurrent int) *Orchestrator {
+// statusCache may be nil to disable status tracking.
+func NewOrchestrator(investigator Investigator, reporter Reporter, maxConcurrent int, statusCache *StatusCache) *Orchestrator {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Orchestrator{
 		investigator: investigator,
 		reporter:     reporter,
+		statusCache:  statusCache,
 		active:       make(map[string]context.CancelFunc),
 		semaphore:    make(chan struct{}, maxConcurrent),
 		ctx:          ctx,
@@ -139,6 +143,16 @@ func (o *Orchestrator) Investigate(event models.RolloutEvent) {
 				}
 				slog.Error("failed to post investigation report", "deployment", key, "error", err)
 			}
+		}
+
+		if o.statusCache != nil {
+			o.statusCache.Update(InvestigationStatus{
+				DeploymentKey: key,
+				Result:        report.Result,
+				FailureReason: report.FailureReason,
+				Duration:      report.Duration,
+				Timestamp:     time.Now(),
+			})
 		}
 	}()
 }

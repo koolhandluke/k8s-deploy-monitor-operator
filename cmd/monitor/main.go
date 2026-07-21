@@ -104,6 +104,7 @@ func main() {
 	var dispatcher *dispatch.Dispatcher
 	var diagTarget *diagnostic.AsyncDiagnosticTarget
 	var orchestrator *investigation.Orchestrator
+	var statusCache *investigation.StatusCache
 
 	if cfg.DispatcherSplit {
 		// Split mode: monitor only writes CRDs, dispatcher service handles dispatch
@@ -152,7 +153,10 @@ func main() {
 				)
 			}
 
-			orchestrator = investigation.NewOrchestrator(investigator, slackReporter, cfg.InvestigationMaxConcurrent)
+			if cfg.Trace {
+				statusCache = investigation.NewStatusCache()
+			}
+			orchestrator = investigation.NewOrchestrator(investigator, slackReporter, cfg.InvestigationMaxConcurrent, statusCache)
 			targets = append(targets, investigation.NewInvestigationTarget(orchestrator))
 			slog.Info("investigation mode enabled",
 				"mode", cfg.InvestigationMode,
@@ -183,6 +187,22 @@ func main() {
 		dispatcher.Start(ctx)
 	}
 
+	// Start status API server if trace is enabled and investigation mode is active
+	var statusServer *http.Server
+	if statusCache != nil {
+		handler := investigation.NewStatusHandler(statusCache)
+		statusServer = &http.Server{
+			Addr:    fmt.Sprintf(":%d", cfg.StatusAPIPort),
+			Handler: handler,
+		}
+		go func() {
+			slog.Info("status API enabled", "port", cfg.StatusAPIPort)
+			if err := statusServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				slog.Error("status API server error", "error", err)
+			}
+		}()
+	}
+
 	// Start cluster watch manager
 	manager := watcher.NewManager(
 		nsFilter.Allowed,
@@ -204,6 +224,13 @@ func main() {
 	sig := <-sigCh
 
 	slog.Info("shutdown signal received", "signal", sig)
+	if statusServer != nil {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
+		if err := statusServer.Shutdown(shutdownCtx); err != nil {
+			slog.Error("status API shutdown error", "error", err)
+		}
+	}
 	manager.Stop()
 	close(eventCh)
 	if dispatcher != nil {
