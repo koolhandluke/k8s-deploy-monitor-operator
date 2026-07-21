@@ -32,6 +32,129 @@ helm upgrade --install deploy-monitor ./chart/deploy-monitor/ \
   --set image.pullPolicy=Never
 ```
 
+## Deploy with non-agentic investigation (runbook mode)
+
+Runbook mode runs the built-in diagnostic runbook on every rollout: it polls the
+Deployment every 10s, detects failures (CrashLoopBackOff, ImagePullBackOff,
+ProgressDeadlineExceeded, stalls, etc.), gathers events/pod status/logs, and
+posts a failure report to Slack. No external AI service required.
+
+```bash
+helm upgrade --install deploy-monitor ./chart/deploy-monitor/ \
+  --namespace rollout-monitor \
+  --set image.repository=rollout-monitor \
+  --set image.pullPolicy=Never \
+  --set investigation.mode=runbook \
+  --set dispatch.slackWebhookUrl=https://hooks.slack.com/services/YOUR/WEBHOOK/URL
+```
+
+To test without Slack (dumps the full report payload to stdout):
+
+```bash
+helm upgrade --install deploy-monitor ./chart/deploy-monitor/ \
+  --namespace rollout-monitor \
+  --set image.repository=rollout-monitor \
+  --set image.pullPolicy=Never \
+  --set investigation.mode=runbook \
+  --set dispatch.slackWebhookUrl=TEST
+```
+
+> **Note:** Setting `SLACK_WEBHOOK_URL=TEST` enables test mode — the
+> `SlackReporter` logs the full Block Kit JSON payload to stdout instead
+> of posting to Slack.
+
+### Trigger a failing rollout (runbook investigation)
+
+```bash
+# Create a deployment with a valid image
+kubectl create deployment test-fail --image=nginx:1.25 -n default
+
+# Wait for it to stabilise, then trigger a rollout with a bad image
+kubectl set image deployment/test-fail nginx=nginx:doesnotexist -n default
+
+# Watch the monitor logs — after the 30s debounce you should see:
+#   1. "investigation started" with mode=runbook
+#   2. Poll logs every 10s (generation gate, failure checks)
+#   3. "investigation complete" with result=FAILED and diagnostic details
+kubectl logs -n rollout-monitor -l app.kubernetes.io/name=deploy-monitor -f
+```
+
+Other failure scenarios to try:
+
+```bash
+# CrashLoopBackOff — container starts but exits immediately
+kubectl set image deployment/test-fail nginx=busybox -n default
+# (busybox exits immediately since there's no long-running command)
+
+# Missing ConfigMap — CreateContainerConfigError
+kubectl patch deployment test-fail -n default --type=json \
+  -p='[{"op":"add","path":"/spec/template/spec/containers/0/envFrom","value":[{"configMapRef":{"name":"does-not-exist"}}]}]'
+```
+
+Clean up test deployments:
+
+```bash
+kubectl delete deployment test-fail -n default
+```
+
+## Investigation Status API (trace mode)
+
+When deployed with `logging.trace=true` and an investigation mode enabled, the monitor exposes a lightweight HTTP API on port 8081 for inspecting investigation results:
+
+```bash
+# Port-forward to the status API
+kubectl port-forward deploy/deploy-monitor-deploy-monitor 8081:8081 -n rollout-monitor
+
+# List all investigation results
+curl localhost:8081/api/v1/investigations
+
+# Query a specific deployment (matches by namespace/name suffix)
+curl localhost:8081/api/v1/investigations/default/nginx
+```
+
+Response shape:
+
+```json
+{
+  "deployment_key": "minikube/default/nginx",
+  "result": "SUCCESS",
+  "failure_reason": "",
+  "duration": "62s",
+  "timestamp": "2026-07-20T12:00:00Z"
+}
+```
+
+The cache stores the last result per deployment key. It has zero cost when trace is disabled — no `StatusCache` is allocated and no HTTP server starts.
+
+## E2E Tests
+
+The automated E2E test suite validates the investigation pipeline against a local minikube cluster:
+
+```bash
+./test/e2e.sh
+```
+
+This builds the image, deploys via Helm with `investigation.mode=runbook` and `logging.trace=true`, then runs 6 scenarios:
+
+1. **Healthy rollout** — image update succeeds, expects `SUCCESS`
+2. **Bad image tag** — non-existent image, expects `FAILED`
+3. **CrashLoopBackOff** — container exits immediately, expects `FAILED`
+4. **Missing ConfigMap** — references non-existent ConfigMap, expects `FAILED`
+5. **Deleted mid-rollout** — deployment deleted during investigation, expects `DELETED`
+6. **Supersede** — two rapid image changes, first cancelled, second completes
+
+Tests 1-5 validate results via the status API (`curl /api/v1/investigations/{ns}/{name}`). Test 6 also checks logs for the supersede cancellation message.
+
+Environment variable overrides:
+
+| Var | Default | Description |
+|-----|---------|-------------|
+| `E2E_NAMESPACE` | `e2e-test` | Namespace for test deployments |
+| `E2E_RELEASE` | `deploy-monitor` | Helm release name |
+| `E2E_RELEASE_NS` | `rollout-monitor` | Namespace for the monitor |
+| `E2E_TEST_TIMEOUT` | `240` | Per-test timeout in seconds |
+| `E2E_LOCAL_PORT` | `18081` | Local port for status API port-forward |
+
 ## Deploy with Holmes dispatch
 
 To test Holmes dispatch locally, first deploy HolmesGPT on the same cluster:
@@ -64,8 +187,9 @@ helm upgrade --install deploy-monitor ./chart/deploy-monitor/ \
   --namespace rollout-monitor \
   --set image.repository=rollout-monitor \
   --set image.pullPolicy=Never \
-  --set dispatch.mode=holmes \
-  --set dispatch.holmesApiUrl=http://holmes-holmes.rollout-monitor:80
+  --set investigation.mode=holmes \
+  --set dispatch.holmesApiUrl=http://holmes-holmes.rollout-monitor:80 \
+  --set dispatch.slackWebhookUrl=https://hooks.slack.com/services/YOUR/WEBHOOK/URL
 ```
 
 Holmes API calls take 30-60s (LLM inference + tool calls). Check the monitor logs for `dispatched to holmes` with status 200 to confirm the integration is working.
@@ -115,6 +239,11 @@ kubectl delete crd clusterrolloutstates.deploy-monitor.io rolloutrecords.deploy-
 | `dispatch.slackWebhookUrl` | `""` | Slack webhook (required for `slack`/`both`) |
 | `namespaceFilter.allowlist` | `[]` | If set, only watch these namespaces |
 | `namespaceFilter.denylist` | `[kube-system, kube-public, kube-node-lease]` | Ignored when allowlist is set |
+| `investigation.mode` | `none` | `none`, `runbook`, or `holmes` — post-rollout investigation mode |
+| `investigation.maxConcurrent` | `10` | Max concurrent investigations |
+| `logging.debug` | `false` | Enable debug-level logging |
+| `logging.trace` | `false` | Enable trace-level logging and status API |
+| `logging.statusAPIPort` | `8081` | Status API port (only active when trace=true) |
 | `persistence.enabled` | `true` | CRD-based hash persistence and audit records |
 | `persistence.namespace` | `""` | Namespace for CRs (defaults to release namespace) |
 | `tuning.workerCount` | `3` | Dispatcher worker pool size |
