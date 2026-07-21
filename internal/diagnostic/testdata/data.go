@@ -52,6 +52,10 @@ var (
 	//go:embed pod-init-crash.yaml
 	PodInitCrash string
 
+	// PodContainerCreating holds a pod YAML with a container in ContainerCreating state.
+	//go:embed pod-container-creating.yaml
+	PodContainerCreating string
+
 	// PodPendingNoStatus holds a pod YAML in Pending phase with no container statuses.
 	//go:embed pod-pending-no-status.yaml
 	PodPendingNoStatus string

@@ -290,3 +290,25 @@ func TestMonitorRollout_GenericWaitingFails(t *testing.T) {
 		t.Errorf("expected FAILED, got %s (reason: %s)", result, reason)
 	}
 }
+
+func TestMonitorRollout_ContainerCreatingDoesNotTriggerCheck1(t *testing.T) {
+	// ContainerCreating means the kubelet is actively working — should NOT
+	// trigger the Check 1 fast-fail. The rollout should stall instead since
+	// no forward progress is made.
+	deploy := yamlToDeploy(t, testdata.DeploymentProgressing)
+	rs := yamlToReplicaSet(t, testdata.ReplicasetNew)
+	pod := yamlToPod(t, testdata.PodContainerCreating)
+
+	clientset := fake.NewSimpleClientset(deploy, rs, pod)
+
+	cfg := fastConfig()
+	cfg.ConfigErrorWindow = 5 * time.Millisecond
+	analyzer := &RolloutAnalyzer{config: cfg}
+	event := testEvent()
+
+	result, _ := analyzer.monitorRollout(context.Background(), clientset, event)
+
+	if result == ResultFailed {
+		t.Errorf("ContainerCreating should not trigger Check 1 fast-fail, but got FAILED")
+	}
+}

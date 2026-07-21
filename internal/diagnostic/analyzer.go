@@ -266,6 +266,12 @@ func (a *RolloutAnalyzer) checkFailureConditions(
 			// Generic waiting pattern: any container stuck in Waiting with no restarts
 			// and the pod has existed longer than ConfigErrorWindow is a failure signal.
 			if cs.State.Waiting != nil && cs.State.Waiting.Reason != "" && cs.RestartCount == 0 {
+				// ContainerCreating means the kubelet is actively working (image pull,
+				// volume setup, network setup) — not stuck. Skip Check 1; the stall
+				// timeout and ProgressDeadlineExceeded still catch hangs.
+				if cs.State.Waiting.Reason == "ContainerCreating" {
+					continue
+				}
 				slog.Log(ctx, trace.LevelTrace, "container waiting before first start",
 					"pod", pod.Name,
 					"container", cs.Name,
