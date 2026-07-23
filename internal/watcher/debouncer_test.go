@@ -13,7 +13,7 @@ func TestDebouncer_SingleEvent(t *testing.T) {
 	defer d.Stop()
 
 	d.Submit("cluster/ns/deploy", models.RolloutEvent{
-		ClusterName:    "test-cluster",
+		ClusterID:      "test-cluster",
 		Namespace:      "ns",
 		DeploymentName: "deploy",
 		NewImages:      []string{"app:v2"},

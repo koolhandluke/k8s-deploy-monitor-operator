@@ -52,10 +52,10 @@ func (d *Dispatcher) SetOnDispatched(fn func(context.Context, models.RolloutEven
 func (d *Dispatcher) Start(ctx context.Context) {
 	for i := 0; i < d.workers; i++ {
 		d.wg.Add(1)
-		go func(workerID int) {
+		go func() {
 			defer d.wg.Done()
-			d.worker(ctx, workerID)
-		}(i)
+			d.worker(ctx)
+		}()
 	}
 
 	slog.Info("dispatcher started", "workers", d.workers, "targets", d.targetNames())
@@ -75,7 +75,7 @@ func (d *Dispatcher) DispatchEvent(ctx context.Context, event models.RolloutEven
 		if err := t.Dispatch(ctx, event); err != nil {
 			slog.Error("dispatch failed",
 				"target", t.Name(),
-				"cluster", event.ClusterName,
+				"cluster", event.ClusterID,
 				"deployment", event.Namespace+"/"+event.DeploymentName,
 				"error", err,
 			)
@@ -88,7 +88,7 @@ func (d *Dispatcher) DispatchEvent(ctx context.Context, event models.RolloutEven
 }
 
 // worker reads events from eventCh and dispatches them until the channel closes or ctx is cancelled.
-func (d *Dispatcher) worker(ctx context.Context, id int) {
+func (d *Dispatcher) worker(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():

@@ -19,7 +19,6 @@ import (
 func testEvent() models.RolloutEvent {
 	return models.RolloutEvent{
 		ClusterID:      "test-cluster",
-		ClusterName:    "test-cluster",
 		Namespace:      "default",
 		DeploymentName: "myapp",
 		Timestamp:      time.Now(),
@@ -244,7 +243,7 @@ func TestProgressState_RecordsForwardProgress(t *testing.T) {
 
 func TestClusterRegistry_ClientsetFor(t *testing.T) {
 	registry := NewClusterRegistry([]config.ClusterInfo{
-		{ID: "cluster-1", Name: "cluster-1", RestConfig: &rest.Config{Host: "https://cluster-1:6443"}},
+		{ID: "cluster-1", RestConfig: &rest.Config{Host: "https://cluster-1:6443"}},
 	})
 
 	_, err := registry.ClientsetFor("cluster-1")
@@ -260,11 +259,11 @@ func TestClusterRegistry_ClientsetFor(t *testing.T) {
 
 func TestClusterRegistry_Update(t *testing.T) {
 	registry := NewClusterRegistry([]config.ClusterInfo{
-		{ID: "cluster-1", Name: "cluster-1", RestConfig: &rest.Config{Host: "https://cluster-1:6443"}},
+		{ID: "cluster-1", RestConfig: &rest.Config{Host: "https://cluster-1:6443"}},
 	})
 
 	registry.Update([]config.ClusterInfo{
-		{ID: "cluster-2", Name: "cluster-2", RestConfig: &rest.Config{Host: "https://cluster-2:6443"}},
+		{ID: "cluster-2", RestConfig: &rest.Config{Host: "https://cluster-2:6443"}},
 	})
 
 	_, err := registry.ClientsetFor("cluster-1")
@@ -381,7 +380,7 @@ func TestCollectEvents(t *testing.T) {
 
 func TestAsyncDiagnosticTarget_DropsWhenFull(t *testing.T) {
 	registry := NewClusterRegistry([]config.ClusterInfo{
-		{ID: "test-cluster", Name: "test-cluster", RestConfig: &rest.Config{Host: "https://localhost:6443"}},
+		{ID: "test-cluster", RestConfig: &rest.Config{Host: "https://localhost:6443"}},
 	})
 	analyzer := NewRolloutAnalyzer(registry, DefaultAnalyzerConfig())
 	target := NewAsyncDiagnosticTarget(analyzer, 1)
@@ -411,7 +410,7 @@ func TestAsyncDiagnosticTarget_Name(t *testing.T) {
 
 func TestAsyncDiagnosticTarget_RejectsAfterStop(t *testing.T) {
 	registry := NewClusterRegistry([]config.ClusterInfo{
-		{ID: "test-cluster", Name: "test-cluster", RestConfig: &rest.Config{Host: "https://localhost:6443"}},
+		{ID: "test-cluster", RestConfig: &rest.Config{Host: "https://localhost:6443"}},
 	})
 	analyzer := NewRolloutAnalyzer(registry, DefaultAnalyzerConfig())
 	target := NewAsyncDiagnosticTarget(analyzer, 10)
@@ -428,7 +427,7 @@ func TestAsyncDiagnosticTarget_RejectsAfterStop(t *testing.T) {
 
 func TestAsyncDiagnosticTarget_StopDrainsInFlight(t *testing.T) {
 	registry := NewClusterRegistry([]config.ClusterInfo{
-		{ID: "test-cluster", Name: "test-cluster", RestConfig: &rest.Config{Host: "https://localhost:6443"}},
+		{ID: "test-cluster", RestConfig: &rest.Config{Host: "https://localhost:6443"}},
 	})
 	analyzer := NewRolloutAnalyzer(registry, DefaultAnalyzerConfig())
 	target := NewAsyncDiagnosticTarget(analyzer, 10)

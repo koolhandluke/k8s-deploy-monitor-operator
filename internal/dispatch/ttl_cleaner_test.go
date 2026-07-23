@@ -129,7 +129,6 @@ func TestTTLCleaner_KeepsProcessingRecords(t *testing.T) {
 	record.SetResourceVersion("1000")
 	record.Object["spec"] = map[string]interface{}{
 		"clusterID":       "cluster-1",
-		"clusterName":     "prod",
 		"namespace":       "default",
 		"deployment":      "web-app",
 		"oldTemplateHash": "abc",

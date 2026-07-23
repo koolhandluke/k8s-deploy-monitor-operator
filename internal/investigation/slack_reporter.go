@@ -98,7 +98,7 @@ func (s *SlackReporter) successMessage(report *diagnostic.DiagnosticReport) map[
 	text := fmt.Sprintf(":white_check_mark: Rollout *SUCCESS*: `%s` (`%s`) on *%s* — completed in %s",
 		report.Event.DeploymentName,
 		report.Event.Namespace,
-		report.Event.ClusterName,
+		report.Event.ClusterID,
 		report.Duration.Round(1e9).String(), // round to seconds
 	)
 	return map[string]interface{}{
@@ -117,7 +117,7 @@ func (s *SlackReporter) failureMessage(report *diagnostic.DiagnosticReport) map[
 
 	// Context: namespace, cluster, duration, reason
 	contextLines := []string{
-		fmt.Sprintf("*Namespace:* `%s` | *Cluster:* `%s`", report.Event.Namespace, report.Event.ClusterName),
+		fmt.Sprintf("*Namespace:* `%s` | *Cluster:* `%s`", report.Event.Namespace, report.Event.ClusterID),
 		fmt.Sprintf("*Duration:* %s", report.Duration.Round(1e9).String()),
 	}
 	if report.FailureReason != "" {

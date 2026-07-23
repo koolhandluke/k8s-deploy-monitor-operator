@@ -54,7 +54,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	ctrlClient, dynClient, err := initClients(restCfg)
+	_, dynClient, err := initClients(restCfg)
 	if err != nil {
 		slog.Error("failed to initialize kubernetes clients", "error", err)
 		os.Exit(1)
@@ -78,7 +78,7 @@ func main() {
 		namespace = "rollout-monitor"
 	}
 
-	recordWatcher := dispatch.NewRecordWatcher(dynClient, ctrlClient, dispatcher, namespace)
+	recordWatcher := dispatch.NewRecordWatcher(dynClient, dispatcher, namespace)
 
 	// Create TTL cleaner
 	ttlCleaner := dispatch.NewTTLCleaner(dynClient, namespace, cfg.RolloutRecordTTLDays)

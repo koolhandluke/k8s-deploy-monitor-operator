@@ -50,7 +50,7 @@ func TestClusterWatcher_DetectsRollout(t *testing.T) {
 	debouncer := NewDebouncer(100*time.Millisecond, eventCh)
 	defer debouncer.Stop()
 
-	w := NewClusterWatcher("test-cluster", "test-cluster", clientset, debouncer, func(string) bool { return true }, nil, 30*time.Second)
+	w := NewClusterWatcher("test-cluster", clientset, debouncer, func(string) bool { return true }, nil, 30*time.Second)
 	if err := w.Start(ctx); err != nil {
 		t.Fatalf("failed to start watcher: %v", err)
 	}
@@ -93,7 +93,7 @@ func TestClusterWatcher_IgnoresStatusUpdates(t *testing.T) {
 	debouncer := NewDebouncer(50*time.Millisecond, eventCh)
 	defer debouncer.Stop()
 
-	w := NewClusterWatcher("test-cluster", "test-cluster", clientset, debouncer, func(string) bool { return true }, nil, 30*time.Second)
+	w := NewClusterWatcher("test-cluster", clientset, debouncer, func(string) bool { return true }, nil, 30*time.Second)
 	if err := w.Start(ctx); err != nil {
 		t.Fatalf("failed to start watcher: %v", err)
 	}
@@ -130,7 +130,7 @@ func TestClusterWatcher_NamespaceFilter(t *testing.T) {
 	// Filter out kube-system
 	nsFilter := func(ns string) bool { return ns != "kube-system" }
 
-	w := NewClusterWatcher("test-cluster", "test-cluster", clientset, debouncer, nsFilter, nil, 30*time.Second)
+	w := NewClusterWatcher("test-cluster", clientset, debouncer, nsFilter, nil, 30*time.Second)
 	if err := w.Start(ctx); err != nil {
 		t.Fatalf("failed to start watcher: %v", err)
 	}
@@ -198,7 +198,7 @@ func TestExtractImages_Nil(t *testing.T) {
 }
 
 func TestHealthStatus_InitiallyHealthy(t *testing.T) {
-	w := NewClusterWatcher("test", "test", fake.NewSimpleClientset(), nil, func(string) bool { return true }, nil, 30*time.Second)
+	w := NewClusterWatcher("test", fake.NewSimpleClientset(), nil, func(string) bool { return true }, nil, 30*time.Second)
 	healthy, perm, lastErr := w.HealthStatus()
 	if !healthy {
 		t.Error("expected healthy initially")
@@ -212,7 +212,7 @@ func TestHealthStatus_InitiallyHealthy(t *testing.T) {
 }
 
 func TestHealthStatus_UnhealthyAfterErrors(t *testing.T) {
-	w := NewClusterWatcher("test", "test", fake.NewSimpleClientset(), nil, func(string) bool { return true }, nil, 30*time.Second)
+	w := NewClusterWatcher("test", fake.NewSimpleClientset(), nil, func(string) bool { return true }, nil, 30*time.Second)
 
 	// Simulate 5 consecutive errors
 	for i := 0; i < 5; i++ {
@@ -236,7 +236,7 @@ func TestHealthStatus_UnhealthyAfterErrors(t *testing.T) {
 }
 
 func TestHealthStatus_PermanentError(t *testing.T) {
-	w := NewClusterWatcher("test", "test", fake.NewSimpleClientset(), nil, func(string) bool { return true }, nil, 30*time.Second)
+	w := NewClusterWatcher("test", fake.NewSimpleClientset(), nil, func(string) bool { return true }, nil, 30*time.Second)
 
 	w.permanent.Store(true)
 	w.lastWatchError.Store(fmt.Errorf("Unauthorized"))
@@ -251,7 +251,7 @@ func TestHealthStatus_PermanentError(t *testing.T) {
 }
 
 func TestHealthStatus_ResetByEventHandler(t *testing.T) {
-	w := NewClusterWatcher("test", "test", fake.NewSimpleClientset(), nil, func(string) bool { return true }, nil, 30*time.Second)
+	w := NewClusterWatcher("test", fake.NewSimpleClientset(), nil, func(string) bool { return true }, nil, 30*time.Second)
 
 	// Simulate errors
 	for i := 0; i < 5; i++ {

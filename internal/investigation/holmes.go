@@ -48,7 +48,7 @@ func (h *HolmesInvestigator) Investigate(ctx context.Context, event models.Rollo
 		"Deployment %s in namespace %s on cluster %s rolled out: %s -> %s. Analyse the rollout health and report any issues.",
 		event.DeploymentName,
 		event.Namespace,
-		event.ClusterName,
+		event.ClusterID,
 		strings.Join(event.OldImages, ", "),
 		strings.Join(event.NewImages, ", "),
 	)

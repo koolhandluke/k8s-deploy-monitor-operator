@@ -44,7 +44,6 @@ func (r *AuditRecorder) RecordRollout(ctx context.Context, event models.RolloutE
 		},
 		Spec: v1alpha1.RolloutRecordSpec{
 			ClusterID:       event.ClusterID,
-			ClusterName:     event.ClusterName,
 			Namespace:       event.Namespace,
 			Deployment:      event.DeploymentName,
 			OldImages:       event.OldImages,
@@ -68,7 +67,7 @@ func (r *AuditRecorder) RecordRollout(ctx context.Context, event models.RolloutE
 
 	slog.Info("rollout record created",
 		"name", name,
-		"cluster", event.ClusterName,
+		"cluster", event.ClusterID,
 		"deployment", event.Namespace+"/"+event.DeploymentName,
 	)
 	return nil

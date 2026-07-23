@@ -3,6 +3,7 @@ package watcher
 import (
 	"context"
 	"log/slog"
+	"sync"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -30,6 +31,7 @@ type ConfigWatcher struct {
 	client    client.Client
 	dynClient dynamic.Interface
 	stopCh    chan struct{}
+	stopOnce  sync.Once
 }
 
 // NewConfigWatcher creates a watcher that updates filter when MonitorConfig changes.
@@ -67,10 +69,12 @@ func (cw *ConfigWatcher) Start(ctx context.Context) {
 	slog.Info("config watcher started, watching MonitorConfig resources")
 }
 
-// Stop stops the config watcher.
+// Stop stops the config watcher. Safe to call multiple times.
 func (cw *ConfigWatcher) Stop() {
-	close(cw.stopCh)
-	slog.Info("config watcher stopped")
+	cw.stopOnce.Do(func() {
+		close(cw.stopCh)
+		slog.Info("config watcher stopped")
+	})
 }
 
 // initialSync loads the "default" MonitorConfig CRD and applies its namespace

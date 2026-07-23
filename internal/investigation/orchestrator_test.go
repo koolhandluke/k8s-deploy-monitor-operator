@@ -56,7 +56,6 @@ func (f *fakeReporter) getReports() []*diagnostic.DiagnosticReport {
 func testRolloutEvent(name string) models.RolloutEvent {
 	return models.RolloutEvent{
 		ClusterID:      "test-cluster",
-		ClusterName:    "test-cluster",
 		Namespace:      "default",
 		DeploymentName: name,
 		Timestamp:      time.Now(),

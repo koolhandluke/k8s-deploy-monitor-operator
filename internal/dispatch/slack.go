@@ -40,12 +40,15 @@ func (s *SlackTarget) Dispatch(ctx context.Context, event models.RolloutEvent) e
 		"*Rollout detected:* `%s` (`%s`) on *%s*\n%s → %s",
 		event.DeploymentName,
 		event.Namespace,
-		event.ClusterName,
+		event.ClusterID,
 		strings.Join(event.OldImages, ", "),
 		strings.Join(event.NewImages, ", "),
 	)
 
-	body, _ := json.Marshal(slackMessage{Text: text})
+	body, err := json.Marshal(slackMessage{Text: text})
+	if err != nil {
+		return fmt.Errorf("marshalling slack message: %w", err)
+	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.webhookURL, bytes.NewReader(body))
 	if err != nil {
@@ -64,7 +67,7 @@ func (s *SlackTarget) Dispatch(ctx context.Context, event models.RolloutEvent) e
 	}
 
 	slog.Info("dispatched to slack",
-		"cluster", event.ClusterName,
+		"cluster", event.ClusterID,
 		"deployment", event.Namespace+"/"+event.DeploymentName,
 	)
 	return nil

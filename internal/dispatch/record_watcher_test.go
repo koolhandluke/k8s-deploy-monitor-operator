@@ -42,7 +42,6 @@ func makeRecord(name, namespace string, phase v1alpha1.RolloutPhase, createdAt t
 	u.SetResourceVersion("1000")
 	u.Object["spec"] = map[string]interface{}{
 		"clusterID":       "cluster-1",
-		"clusterName":     "prod",
 		"namespace":       "default",
 		"deployment":      "web-app",
 		"oldTemplateHash": "abc123",
@@ -59,7 +58,7 @@ func TestRecordWatcher_HandleRecord_SkipsNonDetected(t *testing.T) {
 	dynClient := newFakeDynClient()
 	dispatcher := NewStandaloneDispatcher([]Target{&LogTarget{}})
 
-	rw := NewRecordWatcher(dynClient, nil, dispatcher, "rollout-monitor")
+	rw := NewRecordWatcher(dynClient, dispatcher, "rollout-monitor")
 
 	// Create a record with phase Dispatched (should be skipped)
 	record := makeRecord("test-1", "rollout-monitor", v1alpha1.PhaseDispatched, time.Now())
@@ -72,7 +71,7 @@ func TestRecordWatcher_ToRolloutEvent(t *testing.T) {
 	dynClient := newFakeDynClient()
 	dispatcher := NewStandaloneDispatcher([]Target{&LogTarget{}})
 
-	rw := NewRecordWatcher(dynClient, nil, dispatcher, "rollout-monitor")
+	rw := NewRecordWatcher(dynClient, dispatcher, "rollout-monitor")
 
 	now := time.Now().Truncate(time.Second)
 	record := makeRecord("test-1", "rollout-monitor", v1alpha1.PhaseDetected, now)
@@ -83,9 +82,6 @@ func TestRecordWatcher_ToRolloutEvent(t *testing.T) {
 
 	if event.ClusterID != "cluster-1" {
 		t.Errorf("expected clusterID=cluster-1, got %s", event.ClusterID)
-	}
-	if event.ClusterName != "prod" {
-		t.Errorf("expected clusterName=prod, got %s", event.ClusterName)
 	}
 	if event.Namespace != "default" {
 		t.Errorf("expected namespace=default, got %s", event.Namespace)
@@ -109,7 +105,7 @@ func TestRecordWatcher_ClaimRecord_Success(t *testing.T) {
 	dynClient := newFakeDynClient(record)
 	dispatcher := NewStandaloneDispatcher([]Target{&LogTarget{}})
 
-	rw := NewRecordWatcher(dynClient, nil, dispatcher, "rollout-monitor")
+	rw := NewRecordWatcher(dynClient, dispatcher, "rollout-monitor")
 
 	claimed := rw.claimRecord(context.Background(), record)
 	if !claimed {

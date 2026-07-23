@@ -70,7 +70,7 @@ func (t *AsyncDiagnosticTarget) Dispatch(_ context.Context, event models.Rollout
 
 		slog.Info("starting rollout analysis",
 			"deployment", event.DeploymentKey(),
-			"cluster", event.ClusterName,
+			"cluster", event.ClusterID,
 		)
 
 		report, err := t.analyzer.Analyze(ctx, event)
@@ -101,7 +101,7 @@ func (t *AsyncDiagnosticTarget) Stop() {
 func (t *AsyncDiagnosticTarget) logReport(report *DiagnosticReport) {
 	attrs := []any{
 		"deployment", report.Event.DeploymentKey(),
-		"cluster", report.Event.ClusterName,
+		"cluster", report.Event.ClusterID,
 		"result", string(report.Result),
 		"duration", report.Duration.Round(time.Second).String(),
 	}

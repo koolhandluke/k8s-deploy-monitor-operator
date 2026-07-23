@@ -18,7 +18,7 @@ func (l *LogTarget) Name() string { return "log" }
 // Dispatch logs the rollout event details at info level.
 func (l *LogTarget) Dispatch(_ context.Context, event models.RolloutEvent) error {
 	slog.Info("ROLLOUT EVENT",
-		"cluster", event.ClusterName,
+		"cluster", event.ClusterID,
 		"namespace", event.Namespace,
 		"deployment", event.DeploymentName,
 		"images", fmt.Sprintf("%s -> %s",

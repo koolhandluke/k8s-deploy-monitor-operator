@@ -3,14 +3,15 @@ package dispatch
 import (
 	"context"
 	"log/slog"
+	"sync"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/dynamic/dynamicinformer"
 	"k8s.io/client-go/tools/cache"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	v1alpha1 "github.com/koolhandluke/k8s-deploy-monitor-operator/api/v1alpha1"
 	"github.com/koolhandluke/k8s-deploy-monitor-operator/internal/models"
@@ -25,19 +26,18 @@ var rolloutRecordGVR = schema.GroupVersionResource{
 
 // RecordWatcher watches RolloutRecord CRDs and dispatches events using optimistic locking.
 type RecordWatcher struct {
-	dynClient  dynamic.Interface
-	ctrlClient client.Client
-	dispatcher *Dispatcher
-	namespace  string
+	dynClient    dynamic.Interface
+	dispatcher   *Dispatcher
+	namespace    string
 	stuckTimeout time.Duration
-	stopCh     chan struct{}
+	stopCh       chan struct{}
+	stopOnce     sync.Once
 }
 
 // NewRecordWatcher creates a watcher that processes RolloutRecord CRDs.
-func NewRecordWatcher(dynClient dynamic.Interface, ctrlClient client.Client, dispatcher *Dispatcher, namespace string) *RecordWatcher {
+func NewRecordWatcher(dynClient dynamic.Interface, dispatcher *Dispatcher, namespace string) *RecordWatcher {
 	return &RecordWatcher{
 		dynClient:    dynClient,
-		ctrlClient:   ctrlClient,
 		dispatcher:   dispatcher,
 		namespace:    namespace,
 		stuckTimeout: 10 * time.Minute,
@@ -70,10 +70,12 @@ func (rw *RecordWatcher) Start(ctx context.Context) {
 	slog.Info("record watcher started", "namespace", rw.namespace)
 }
 
-// Stop stops the record watcher.
+// Stop stops the record watcher. Safe to call multiple times.
 func (rw *RecordWatcher) Stop() {
-	close(rw.stopCh)
-	slog.Info("record watcher stopped")
+	rw.stopOnce.Do(func() {
+		close(rw.stopCh)
+		slog.Info("record watcher stopped")
+	})
 }
 
 // handleRecord processes a single RolloutRecord: claims it, dispatches the event, and updates status.
@@ -124,7 +126,7 @@ func (rw *RecordWatcher) claimRecord(ctx context.Context, u *unstructured.Unstru
 
 	// Update via dynamic client — resourceVersion ensures compare-and-swap
 	_, err := rw.dynClient.Resource(rolloutRecordGVR).Namespace(claim.GetNamespace()).
-		UpdateStatus(ctx, claim, metav1Options())
+		UpdateStatus(ctx, claim, metav1.UpdateOptions{})
 	if err != nil {
 		// 409 Conflict means another replica claimed it
 		slog.Debug("claim failed (likely conflict)", "name", claim.GetName(), "error", err)
@@ -144,7 +146,6 @@ func (rw *RecordWatcher) toRolloutEvent(u *unstructured.Unstructured) models.Rol
 
 	return models.RolloutEvent{
 		ClusterID:       getStr(spec, "clusterID"),
-		ClusterName:     getStr(spec, "clusterName"),
 		Namespace:       getStr(spec, "namespace"),
 		DeploymentName:  getStr(spec, "deployment"),
 		OldTemplateHash: getStr(spec, "oldTemplateHash"),
@@ -158,7 +159,7 @@ func (rw *RecordWatcher) toRolloutEvent(u *unstructured.Unstructured) models.Rol
 // updateRecordStatus sets the final phase, dispatch targets, and error on a RolloutRecord.
 func (rw *RecordWatcher) updateRecordStatus(ctx context.Context, name, ns string, targets []string, dispatchErr string) {
 	// Get the latest version
-	record, err := rw.dynClient.Resource(rolloutRecordGVR).Namespace(ns).Get(ctx, name, metav1GetOptions())
+	record, err := rw.dynClient.Resource(rolloutRecordGVR).Namespace(ns).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
 		slog.Warn("failed to get record for status update", "name", name, "error", err)
 		return
@@ -180,7 +181,7 @@ func (rw *RecordWatcher) updateRecordStatus(ctx context.Context, name, ns string
 	status["dispatchTargets"] = toInterfaceSlice(targets)
 
 	_, err = rw.dynClient.Resource(rolloutRecordGVR).Namespace(ns).
-		UpdateStatus(ctx, record, metav1Options())
+		UpdateStatus(ctx, record, metav1.UpdateOptions{})
 	if err != nil {
 		slog.Warn("failed to update record status", "name", name, "error", err)
 	}
@@ -206,7 +207,7 @@ func (rw *RecordWatcher) recoverStuckRecords(ctx context.Context) {
 // doRecoverStuck lists Processing records and resets any that exceed the stuck timeout to Detected.
 func (rw *RecordWatcher) doRecoverStuck(ctx context.Context) {
 	list, err := rw.dynClient.Resource(rolloutRecordGVR).Namespace(rw.namespace).
-		List(ctx, metav1ListOptions())
+		List(ctx, metav1.ListOptions{})
 	if err != nil {
 		slog.Warn("failed to list records for stuck recovery", "error", err)
 		return
@@ -235,7 +236,7 @@ func (rw *RecordWatcher) doRecoverStuck(ctx context.Context) {
 		status["phase"] = string(v1alpha1.PhaseDetected)
 
 		_, err := rw.dynClient.Resource(rolloutRecordGVR).Namespace(rw.namespace).
-			UpdateStatus(ctx, item, metav1Options())
+			UpdateStatus(ctx, item, metav1.UpdateOptions{})
 		if err != nil {
 			slog.Debug("failed to reset stuck record", "name", item.GetName(), "error", err)
 		} else {

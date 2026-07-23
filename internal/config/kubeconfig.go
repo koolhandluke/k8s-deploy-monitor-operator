@@ -15,7 +15,6 @@ import (
 // ClusterInfo holds connection details for a single cluster.
 type ClusterInfo struct {
 	ID         string       // unique identifier (context name or filename stem)
-	Name       string       // human-readable name
 	RestConfig *rest.Config
 }
 
@@ -61,7 +60,6 @@ func loadFromDirectory(dir string) ([]ClusterInfo, error) {
 		stem := filenameStem(name)
 		clusters = append(clusters, ClusterInfo{
 			ID:         stem,
-			Name:       stem,
 			RestConfig: restCfg,
 		})
 	}
@@ -120,7 +118,6 @@ func LoadDirectorySnapshot(dir string) (*ClusterSnapshot, error) {
 
 		snap.Clusters = append(snap.Clusters, ClusterInfo{
 			ID:         stem,
-			Name:       stem,
 			RestConfig: restCfg,
 		})
 		snap.FileHashes[stem] = hash

@@ -3,9 +3,11 @@ package dispatch
 import (
 	"context"
 	"log/slog"
+	"sync"
 	"time"
 
 	v1alpha1 "github.com/koolhandluke/k8s-deploy-monitor-operator/api/v1alpha1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/dynamic"
 )
 
@@ -15,6 +17,7 @@ type TTLCleaner struct {
 	namespace string
 	ttl       time.Duration
 	stopCh    chan struct{}
+	stopOnce  sync.Once
 }
 
 // NewTTLCleaner creates a cleaner that deletes records older than ttl.
@@ -46,15 +49,17 @@ func (tc *TTLCleaner) Start(ctx context.Context) {
 	}
 }
 
-// Stop stops the TTL cleaner.
+// Stop stops the TTL cleaner. Safe to call multiple times.
 func (tc *TTLCleaner) Stop() {
-	close(tc.stopCh)
+	tc.stopOnce.Do(func() {
+		close(tc.stopCh)
+	})
 }
 
 // cleanup lists terminal RolloutRecords and deletes those older than the configured TTL.
 func (tc *TTLCleaner) cleanup(ctx context.Context) {
 	list, err := tc.dynClient.Resource(rolloutRecordGVR).Namespace(tc.namespace).
-		List(ctx, metav1ListOptions())
+		List(ctx, metav1.ListOptions{})
 	if err != nil {
 		slog.Warn("ttl cleaner: failed to list records", "error", err)
 		return
@@ -80,7 +85,7 @@ func (tc *TTLCleaner) cleanup(ctx context.Context) {
 
 		// Delete the record
 		err := tc.dynClient.Resource(rolloutRecordGVR).Namespace(tc.namespace).
-			Delete(ctx, item.GetName(), metav1DeleteOptions())
+			Delete(ctx, item.GetName(), metav1.DeleteOptions{})
 		if err != nil {
 			slog.Warn("ttl cleaner: failed to delete record", "name", item.GetName(), "error", err)
 		} else {

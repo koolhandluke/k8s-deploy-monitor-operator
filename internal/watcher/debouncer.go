@@ -64,12 +64,12 @@ func (d *Debouncer) emit(key string) {
 	select {
 	case d.out <- event:
 		slog.Info("debounced event emitted",
-			"cluster", event.ClusterName,
+			"cluster", event.ClusterID,
 			"deployment", event.Namespace+"/"+event.DeploymentName,
 		)
 	default:
 		slog.Warn("dispatch queue full, dropping event",
-			"cluster", event.ClusterName,
+			"cluster", event.ClusterID,
 			"deployment", event.Namespace+"/"+event.DeploymentName,
 		)
 	}

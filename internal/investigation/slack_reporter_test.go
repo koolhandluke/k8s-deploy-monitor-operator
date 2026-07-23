@@ -17,7 +17,6 @@ func successReport() *diagnostic.DiagnosticReport {
 	return &diagnostic.DiagnosticReport{
 		Event: models.RolloutEvent{
 			ClusterID:      "prod-cluster",
-			ClusterName:    "prod-cluster",
 			Namespace:      "default",
 			DeploymentName: "myapp",
 		},
@@ -30,7 +29,6 @@ func failureReport() *diagnostic.DiagnosticReport {
 	return &diagnostic.DiagnosticReport{
 		Event: models.RolloutEvent{
 			ClusterID:      "prod-cluster",
-			ClusterName:    "prod-cluster",
 			Namespace:      "default",
 			DeploymentName: "myapp",
 		},

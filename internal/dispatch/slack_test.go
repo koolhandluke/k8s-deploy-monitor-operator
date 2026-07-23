@@ -25,7 +25,7 @@ func TestSlackTarget_Dispatch(t *testing.T) {
 
 	target := NewSlackTarget(server.URL, server.Client())
 	event := models.RolloutEvent{
-		ClusterName:    "prod-us-east-1",
+		ClusterID:      "prod-us-east-1",
 		Namespace:      "default",
 		DeploymentName: "checkout",
 		OldImages:      []string{"checkout:v1.9"},
