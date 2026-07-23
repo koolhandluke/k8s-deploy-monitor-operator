@@ -53,7 +53,7 @@ type ClusterRolloutStateList struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:resource:scope=Namespaced,shortName=rr
-// +kubebuilder:printcolumn:name="Cluster",type=string,JSONPath=`.spec.clusterName`
+// +kubebuilder:printcolumn:name="Cluster",type=string,JSONPath=`.spec.clusterID`
 // +kubebuilder:printcolumn:name="Namespace",type=string,JSONPath=`.spec.namespace`
 // +kubebuilder:printcolumn:name="Deployment",type=string,JSONPath=`.spec.deployment`
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
@@ -73,9 +73,6 @@ type RolloutRecord struct {
 type RolloutRecordSpec struct {
 	// ClusterID is the unique identifier for the cluster.
 	ClusterID string `json:"clusterID"`
-
-	// ClusterName is the human-readable cluster name.
-	ClusterName string `json:"clusterName"`
 
 	// Namespace of the deployment.
 	Namespace string `json:"namespace"`
@@ -109,8 +106,6 @@ const (
 	PhaseProcessing RolloutPhase = "Processing"
 	// PhaseDispatched indicates the rollout event was successfully sent to all targets.
 	PhaseDispatched RolloutPhase = "Dispatched"
-	// PhaseInvestigated indicates the rollout was analyzed by an investigation target.
-	PhaseInvestigated RolloutPhase = "Investigated"
 	// PhaseFailed indicates dispatch or investigation failed.
 	PhaseFailed RolloutPhase = "Failed"
 )
@@ -119,7 +114,7 @@ const (
 // tracking dispatch progress and any errors.
 type RolloutRecordStatus struct {
 	// Phase of the rollout processing.
-	// +kubebuilder:validation:Enum=Detected;Processing;Dispatched;Investigated;Failed
+	// +kubebuilder:validation:Enum=Detected;Processing;Dispatched;Failed
 	Phase RolloutPhase `json:"phase,omitempty"`
 
 	// DispatchedAt is when the event was dispatched.

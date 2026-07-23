@@ -64,6 +64,28 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Load env configs and slack routing if configured
+	var envConfigs []config.EnvConfig
+	var nsLookup *config.NamespaceLookup
+	var slackRouting config.SlackRouting
+
+	if cfg.EnvConfigDir != "" {
+		envConfigs, err = config.LoadEnvConfigs(cfg.EnvConfigDir)
+		if err != nil {
+			slog.Error("failed to load env configs", "error", err)
+			os.Exit(1)
+		}
+		nsLookup = config.BuildNamespaceLookup(envConfigs)
+	}
+
+	if cfg.SlackRoutingFile != "" {
+		slackRouting, err = config.LoadSlackRouting(cfg.SlackRoutingFile)
+		if err != nil {
+			slog.Error("failed to load slack routing", "error", err)
+			os.Exit(1)
+		}
+	}
+
 	slog.Info("starting rollout monitor",
 		"clusters", len(clusters),
 		"dispatch_mode", cfg.DispatchMode,
@@ -77,7 +99,7 @@ func main() {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// Create NamespaceFilter seeded from env vars (backwards compatible)
+	// Create NamespaceFilter seeded from config (backwards compatible)
 	nsFilter := watcher.NewNamespaceFilter(cfg.NamespaceAllowlist, cfg.NamespaceDenylist)
 
 	// Set up persistence if enabled
@@ -136,6 +158,11 @@ func main() {
 
 		if cfg.DispatchMode == config.DispatchSlack || cfg.DispatchMode == config.DispatchBoth {
 			targets = append(targets, dispatch.NewSlackTarget(cfg.SlackWebhookURL, &http.Client{Timeout: 10 * time.Second}))
+		}
+
+		if cfg.SlackBotToken != "" {
+			targets = append(targets, dispatch.NewSlackBotTarget(cfg.SlackBotToken, &http.Client{Timeout: 10 * time.Second}))
+			slog.Info("slack bot target enabled for per-app channel routing")
 		}
 
 		// Register investigation orchestrator if configured
@@ -218,6 +245,14 @@ func main() {
 		time.Duration(cfg.RescanIntervalSeconds)*time.Second,
 		time.Duration(cfg.WatcherStartTimeoutSeconds)*time.Second,
 	)
+
+	// Wire event enricher for app name + slack channel resolution
+	if nsLookup != nil {
+		manager.SetEventEnricher(func(event *models.RolloutEvent) {
+			event.App = nsLookup.GetApp(event.ClusterID, event.Namespace)
+			event.SlackChannel = nsLookup.GetSlackChannel(event.ClusterID, event.Namespace, slackRouting)
+		})
+	}
 
 	if err := manager.Start(ctx, clusters); err != nil {
 		slog.Error("failed to start watch manager", "error", err)

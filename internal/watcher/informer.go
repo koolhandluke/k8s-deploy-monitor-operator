@@ -28,11 +28,11 @@ type HashObserver interface {
 
 // ClusterWatcher watches deployments on a single cluster using SharedInformerFactory.
 type ClusterWatcher struct {
-	clusterID   string
-	clusterName string
-	clientset   kubernetes.Interface
-	debouncer   *Debouncer
-	nsFilter    func(string) bool
+	clusterID      string
+	clientset      kubernetes.Interface
+	debouncer      *Debouncer
+	nsFilter       func(string) bool
+	eventEnricher  func(*models.RolloutEvent) // sets App + SlackChannel; nil-safe
 
 	templateCache map[string]string // key: clusterID/namespace/name -> SHA256
 	mu            sync.Mutex
@@ -52,7 +52,7 @@ type ClusterWatcher struct {
 // NewClusterWatcher creates a watcher for a single cluster that detects
 // deployment rollouts by tracking spec.template hash changes.
 func NewClusterWatcher(
-	clusterID, clusterName string,
+	clusterID string,
 	clientset kubernetes.Interface,
 	debouncer *Debouncer,
 	nsFilter func(string) bool,
@@ -61,7 +61,6 @@ func NewClusterWatcher(
 ) *ClusterWatcher {
 	return &ClusterWatcher{
 		clusterID:     clusterID,
-		clusterName:   clusterName,
 		clientset:     clientset,
 		debouncer:     debouncer,
 		nsFilter:      nsFilter,
@@ -171,8 +170,6 @@ func (w *ClusterWatcher) resetHealthCounters() {
 
 // onAdd seeds the template cache on initial LIST (baseline — not a rollout).
 func (w *ClusterWatcher) onAdd(obj interface{}) {
-	w.resetHealthCounters()
-
 	deploy, ok := obj.(*appsv1.Deployment)
 	if !ok {
 		return
@@ -180,6 +177,8 @@ func (w *ClusterWatcher) onAdd(obj interface{}) {
 	if !w.nsFilter(deploy.Namespace) {
 		return
 	}
+
+	w.resetHealthCounters()
 
 	fullKey := w.clusterID + "/" + deploy.Namespace + "/" + deploy.Name
 	deployKey := deploy.Namespace + "/" + deploy.Name
@@ -196,8 +195,6 @@ func (w *ClusterWatcher) onAdd(obj interface{}) {
 
 // onUpdate detects rollouts by comparing spec.template hashes.
 func (w *ClusterWatcher) onUpdate(oldObj, newObj interface{}) {
-	w.resetHealthCounters()
-
 	newDeploy, ok := newObj.(*appsv1.Deployment)
 	if !ok {
 		return
@@ -205,6 +202,8 @@ func (w *ClusterWatcher) onUpdate(oldObj, newObj interface{}) {
 	if !w.nsFilter(newDeploy.Namespace) {
 		return
 	}
+
+	w.resetHealthCounters()
 
 	fullKey := w.clusterID + "/" + newDeploy.Namespace + "/" + newDeploy.Name
 	deployKey := newDeploy.Namespace + "/" + newDeploy.Name
@@ -222,7 +221,7 @@ func (w *ClusterWatcher) onUpdate(oldObj, newObj interface{}) {
 
 	if !exists {
 		slog.Debug("update for unseen deployment, seeding cache",
-			"cluster", w.clusterName,
+			"cluster", w.clusterID,
 			"deployment", deployKey,
 			"hash", newHash[:12],
 		)
@@ -230,7 +229,7 @@ func (w *ClusterWatcher) onUpdate(oldObj, newObj interface{}) {
 	}
 	if newHash == oldHash {
 		slog.Debug("update with unchanged template hash, skipping",
-			"cluster", w.clusterName,
+			"cluster", w.clusterID,
 			"deployment", deployKey,
 			"hash", newHash[:12],
 		)
@@ -241,7 +240,6 @@ func (w *ClusterWatcher) onUpdate(oldObj, newObj interface{}) {
 
 	event := models.RolloutEvent{
 		ClusterID:       w.clusterID,
-		ClusterName:     w.clusterName,
 		Namespace:       newDeploy.Namespace,
 		DeploymentName:  newDeploy.Name,
 		OldTemplateHash: oldHash,
@@ -251,8 +249,13 @@ func (w *ClusterWatcher) onUpdate(oldObj, newObj interface{}) {
 		Timestamp:       time.Now(),
 	}
 
+	if w.eventEnricher != nil {
+		w.eventEnricher(&event)
+	}
+
 	slog.Info("rollout detected",
-		"cluster", w.clusterName,
+		"cluster", w.clusterID,
+		"app", event.App,
 		"deployment", newDeploy.Namespace+"/"+newDeploy.Name,
 		"images", fmt.Sprintf("%v -> %v", event.OldImages, event.NewImages),
 	)

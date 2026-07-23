@@ -74,11 +74,12 @@ type Manager struct {
 	startTimeout     time.Duration
 	clientsetFactory ClientsetFactory
 
-	mu           sync.Mutex
-	watchers     map[string]*ClusterWatcher // clusterID → watcher
-	fileHashes   map[string]string          // clusterID → file content hash
-	pendingRetry map[string]*retryEntry     // clusterID → retry state
-	observer     HashObserver
+	mu             sync.Mutex
+	watchers       map[string]*ClusterWatcher // clusterID → watcher
+	fileHashes     map[string]string          // clusterID → file content hash
+	pendingRetry   map[string]*retryEntry     // clusterID → retry state
+	observer       HashObserver
+	eventEnricher  func(*models.RolloutEvent) // enriches events with app/channel; nil-safe
 }
 
 // NewManager creates a Manager that watches the given clusters for deployment
@@ -110,6 +111,12 @@ func NewManager(
 	}
 
 	return m
+}
+
+// SetEventEnricher sets a function that enriches RolloutEvents with app name
+// and Slack channel. Must be called before Start.
+func (m *Manager) SetEventEnricher(fn func(*models.RolloutEvent)) {
+	m.eventEnricher = fn
 }
 
 // Start launches a watcher per cluster with staggered startup (1s between clusters).
@@ -194,13 +201,13 @@ func (m *Manager) startWatcherLocked(ctx context.Context, cluster config.Cluster
 
 	w := NewClusterWatcher(
 		cluster.ID,
-		cluster.Name,
 		clientset,
 		m.debouncer,
 		m.nsFilter,
 		m.observer,
 		m.startTimeout,
 	)
+	w.eventEnricher = m.eventEnricher
 
 	// Seed persisted hashes before starting (enables gap detection)
 	if m.store != nil {
@@ -282,8 +289,7 @@ func (m *Manager) reconcile(ctx context.Context, lastRescan *time.Time) {
 				}
 				m.pendingRetry[id] = &retryEntry{
 					cluster: config.ClusterInfo{
-						ID:   w.clusterID,
-						Name: w.clusterName,
+						ID: w.clusterID,
 					},
 					attempt:   0,
 					nextRetry: time.Now().Add(backoff),
@@ -317,6 +323,19 @@ func (m *Manager) reconcile(ctx context.Context, lastRescan *time.Time) {
 					}
 				}
 			}
+		}
+
+		if cluster.RestConfig == nil {
+			entry.attempt++
+			backoff := retryBackoff(entry.attempt)
+			entry.nextRetry = now.Add(backoff)
+			entry.lastError = "no RestConfig available (cluster not found in directory)"
+			slog.Warn("watcher_retry_skipped",
+				"cluster", id,
+				"reason", "nil RestConfig",
+				"next_backoff", backoff,
+			)
+			continue
 		}
 
 		if err := m.startWatcherLocked(ctx, cluster); err != nil {

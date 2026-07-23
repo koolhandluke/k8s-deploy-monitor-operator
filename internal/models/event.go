@@ -6,13 +6,14 @@ import "time"
 // RolloutEvent represents a detected deployment rollout.
 type RolloutEvent struct {
 	ClusterID       string    // cluster identifier (kubeconfig context name or filename)
-	ClusterName     string    // human-readable cluster name
 	Namespace       string
 	DeploymentName  string
 	OldTemplateHash string    // SHA256 of previous spec.template
 	NewTemplateHash string    // SHA256 of new spec.template
 	OldImages       []string  // container images before rollout
 	NewImages       []string  // container images after rollout
+	App             string    // app name from env config (for logging/metrics/routing)
+	SlackChannel    string    // target Slack channel resolved from app → slack routing
 	Timestamp       time.Time
 }
 
