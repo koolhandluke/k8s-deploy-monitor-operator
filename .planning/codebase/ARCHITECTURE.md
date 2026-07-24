@@ -26,7 +26,9 @@ Monitor Pipeline (combined mode):
                   (health+retry)  (SHA256 map)                         │     │     │
                       │              │                                 Log  Slack  Inv
                       │         HashObserver                                      │
-                      │              │                                    Orchestrator
+                 WatchlistStore       │                                    Orchestrator
+                 ← AppWatchConfig    │
+                 ← HTTP API (:8080)  │
                       ▼              ▼                                       │
                 ConfigWatcher   HashStore (CRD)                        Investigator
                 ← MonitorConfig   flush every 5s                       │         │
@@ -66,6 +68,8 @@ Monitor Pipeline (combined mode):
 | RecordWatcher | Split-mode: watches RolloutRecord CRDs and dispatches via optimistic locking | `internal/dispatch/record_watcher.go` |
 | TTLCleaner | Garbage-collects old RolloutRecord CRDs beyond TTL | `internal/dispatch/ttl_cleaner.go` |
 | StatusCache + StatusHandler | In-memory cache + HTTP API for investigation status (trace mode only) | `internal/investigation/status_cache.go`, `internal/investigation/status_api.go` |
+| WatchlistStore | CRD-backed store with in-memory index for dynamic app watch registrations; O(1) lookup by (clusterID, namespace) | `internal/watchlist/store.go` |
+| WatchlistHandler | HTTP API (GET/PUT/DELETE /api/v1/watchlist) for dynamic app registration; triggers immediate manager reconcile | `internal/watchlist/handler.go` |
 
 ## Pattern Overview
 
@@ -114,6 +118,13 @@ Monitor Pipeline (combined mode):
 - Depends on: `internal/models`, `k8s.io/client-go/kubernetes`
 - Used by: `internal/investigation/`
 
+**Watchlist Layer:**
+- Purpose: Dynamic app watch registration via HTTP API with CRD persistence
+- Location: `internal/watchlist/`
+- Contains: Store (CRD-backed index), Handler (REST API)
+- Depends on: `api/v1alpha1`, `sigs.k8s.io/controller-runtime/pkg/client`
+- Used by: `internal/watcher/` (Manager Phase 0), `cmd/monitor/main.go` (event enricher, HTTP server)
+
 **Persistence Layer:**
 - Purpose: CRD-based storage for template hashes and audit records
 - Location: `internal/persistence/`
@@ -124,7 +135,7 @@ Monitor Pipeline (combined mode):
 **API Types Layer:**
 - Purpose: CRD type definitions for Kubernetes
 - Location: `api/v1alpha1/`
-- Contains: ClusterRolloutState, RolloutRecord, MonitorConfig types + deepcopy + scheme registration
+- Contains: ClusterRolloutState, RolloutRecord, MonitorConfig, AppWatchConfig types + deepcopy + scheme registration
 - Depends on: `k8s.io/apimachinery`
 - Used by: `internal/persistence/`, `internal/watcher/`, `internal/dispatch/`
 
@@ -167,15 +178,17 @@ Monitor Pipeline (combined mode):
 
 ### Health and Rescan Flow
 
-1. Manager.reconcileLoop ticks every 10s (`internal/watcher/manager.go:233`)
-2. Phase 1: Rescans kubeconfig directory for added/changed/removed cluster files (at `rescanInterval`)
-3. Phase 2: Health-checks running watchers (consecutiveErrors >= 5 or permanent auth failure = unhealthy)
-4. Phase 3: Retries pending clusters with exponential backoff (10s to 5m cap)
+1. Manager.reconcileLoop ticks every 10s (also triggered immediately by watchlist API via channel)
+2. Phase 0: Ensures watchers exist for all watchlist-desired clusters (if watchlist enabled)
+3. Phase 1: Rescans kubeconfig directory for added/changed/removed cluster files (at `rescanInterval`)
+4. Phase 2: Health-checks running watchers (consecutiveErrors >= 5 or permanent auth failure = unhealthy)
+5. Phase 3: Retries pending clusters with exponential backoff (10s to 5m cap)
 
 **State Management:**
 - Template hashes: in-memory `templateCache` per ClusterWatcher, optionally persisted to ClusterRolloutState CRDs via HashStore (batched flush every 5s)
 - Namespace filtering: in-memory NamespaceFilter, hot-reloadable via MonitorConfig CRD
 - Investigation state: in-memory `active` map in Orchestrator with cancel functions for supersede
+- Watchlist: in-memory index (clusterID/namespace → app+channel) backed by AppWatchConfig CRDs, rebuilt on startup via `LoadAll`
 
 ## Key Abstractions
 

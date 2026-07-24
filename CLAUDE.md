@@ -21,7 +21,8 @@ No linter or CI config exists in the repo yet.
 Watches Kubernetes Deployments across one or more clusters, detects rollouts, and dispatches
 notifications. Read-only with respect to watched clusters — never mutates Deployments or other
 workload resources. Writes its own CRDs (`ClusterRolloutState`, `RolloutRecord`, `MonitorConfig`)
-for persistence and audit when `PERSISTENCE_ENABLED=true`.
+for persistence and audit when `PERSISTENCE_ENABLED=true`. Optionally exposes an HTTP API
+for dynamic app watch registration when `WATCHLIST_ENABLED=true`.
 
 Pipeline, wired together in [cmd/monitor/main.go](cmd/monitor/main.go):
 
@@ -29,7 +30,8 @@ Pipeline, wired together in [cmd/monitor/main.go](cmd/monitor/main.go):
 kubeconfigs → Manager → ClusterWatcher (1 per cluster) → Debouncer → eventCh → Dispatcher → Targets
                 ↕                ↕                                                   ↕
           reconcileLoop    HashStore (CRD)                                   AuditRecorder (CRD)
-                            ConfigWatcher ← MonitorConfig CRD
+                ↕           ConfigWatcher ← MonitorConfig CRD
+         WatchlistStore ← AppWatchConfig CRD ← HTTP API (:8080)
 ```
 
 - **[internal/config/](internal/config/)** — env-var config plus cluster loading. `KUBECONFIG_DIR`
@@ -38,9 +40,15 @@ kubeconfigs → Manager → ClusterWatcher (1 per cluster) → Debouncer → eve
   staggered 1s apart. Each watcher runs a `SharedInformerFactory` on Deployments with resync
   disabled. Failed clusters are queued for retry with exponential backoff (10s→5m cap).
   The reconcile loop health-checks running watchers (consecutive errors, permanent auth
-  failures) and retries pending clusters. Also contains `NamespaceFilter` (thread-safe,
-  runtime-updatable allow/deny filter) and `ConfigWatcher` (watches `MonitorConfig` CRD to
-  hot-reload namespace filtering).
+  failures) and retries pending clusters. When a watchlist store is configured, reconcile
+  Phase 0 ensures watchers exist for all watchlist-desired clusters. Also contains
+  `NamespaceFilter` (thread-safe, runtime-updatable allow/deny filter) and `ConfigWatcher`
+  (watches `MonitorConfig` CRD to hot-reload namespace filtering).
+- **[internal/watchlist/](internal/watchlist/)** — `Store` manages `AppWatchConfig` CRDs and an
+  in-memory index for O(1) lookups of app name + Slack channel by (clusterID, namespace).
+  `Handler` exposes `GET/PUT/DELETE /api/v1/watchlist` for dynamic registration. PUT triggers
+  an immediate manager reconcile via a channel. Coexists with legacy env-config enrichment
+  (watchlist takes priority in the composite enricher).
 - **[internal/dispatch/](internal/dispatch/)** — `Dispatcher` fans events to `Target`
   implementations via a worker pool. `LogTarget` is always registered; `AuditTarget` is added
   when persistence is enabled; Holmes and Slack are added based on `DISPATCH_MODE`.
@@ -49,7 +57,8 @@ kubeconfigs → Manager → ClusterWatcher (1 per cluster) → Debouncer → eve
   each dispatched event. Both use `controller-runtime` client.
 - **[internal/models/](internal/models/)** — `RolloutEvent`, shared by watcher and dispatch.
 - **[api/v1alpha1/](api/v1alpha1/)** — CRD types: `ClusterRolloutState` (persisted template
-  hashes per cluster), `RolloutRecord` (audit trail), `MonitorConfig` (runtime namespace config).
+  hashes per cluster), `RolloutRecord` (audit trail), `MonitorConfig` (runtime namespace config),
+  `AppWatchConfig` (watchlist app registrations).
 
 ### Rollout detection
 
@@ -88,7 +97,9 @@ blocking the watcher. Queue depth is `QUEUE_MAX_SIZE` (default 100).
 | `RESCAN_INTERVAL_SECONDS` | 600 | how often to re-read `KUBECONFIG_DIR` for added/changed/removed clusters |
 | `WATCHER_START_TIMEOUT_SECONDS` | 30 | timeout for initial cache sync per cluster; prevents hanging on unreachable clusters |
 | `PERSISTENCE_ENABLED` | `false` | enable CRD-based hash persistence and audit recording |
-| `PERSISTENCE_NAMESPACE` | `rollout-monitor` | namespace for `ClusterRolloutState` and `RolloutRecord` CRDs |
+| `PERSISTENCE_NAMESPACE` | `rollout-monitor` | namespace for `ClusterRolloutState`, `RolloutRecord`, and `AppWatchConfig` CRDs |
+| `WATCHLIST_ENABLED` | `false` | enable HTTP API for dynamic app watch registration; requires `PERSISTENCE_ENABLED=true` |
+| `WATCHLIST_PORT` | 8080 | port for the watchlist HTTP API |
 | `DEBUG` | `false` | set to `true` for debug-level logging |
 | `TRACE` | `false` | set to `true` for trace-level logging (investigation pipeline detail) |
 
@@ -100,8 +111,9 @@ Namespace filtering can also be configured at runtime via a `MonitorConfig` CRD 
 ## Conventions
 
 - Structured logging via `log/slog` with a JSON handler; no logging library.
-- Tests use `k8s.io/client-go/kubernetes/fake` clientsets and `httptest` for dispatch targets — no
-  envtest, no live cluster needed.
+- Tests use `k8s.io/client-go/kubernetes/fake` clientsets and `httptest` for dispatch targets.
+  Watchlist store tests use `sigs.k8s.io/controller-runtime/pkg/client/fake`. No envtest, no
+  live cluster needed.
 - New dispatch destinations implement the `Target` interface and get registered in
   `NewDispatcher`.
 

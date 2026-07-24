@@ -9,12 +9,16 @@ import (
 	"testing"
 	"time"
 
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/rest"
+	ctrlfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	v1alpha1 "github.com/koolhandluke/k8s-deploy-monitor-operator/api/v1alpha1"
 	"github.com/koolhandluke/k8s-deploy-monitor-operator/internal/config"
 	"github.com/koolhandluke/k8s-deploy-monitor-operator/internal/models"
+	"github.com/koolhandluke/k8s-deploy-monitor-operator/internal/watchlist"
 )
 
 // minimalKubeconfig returns a valid kubeconfig YAML with a unique server URL.
@@ -466,5 +470,182 @@ func TestReconcile_AllFilesRemoved(t *testing.T) {
 	defer m.mu.Unlock()
 	if len(m.watchers) != 0 {
 		t.Errorf("expected 0 watchers after removing all files, got %d", len(m.watchers))
+	}
+}
+
+func newCRDScheme() *runtime.Scheme {
+	s := runtime.NewScheme()
+	v1alpha1.AddToScheme(s)
+	return s
+}
+
+func TestReconcile_StartsWatchlistClusters(t *testing.T) {
+	dir := t.TempDir()
+
+	// cluster-a exists in kubeconfig dir but has no watcher yet
+	os.WriteFile(filepath.Join(dir, "cluster-a.yaml"),
+		minimalKubeconfig("https://a:6443"), 0644)
+
+	m, _ := newTestManager(t, dir)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	defer m.Stop()
+
+	// Set up a watchlist store that desires cluster-a
+	crdClient := ctrlfake.NewClientBuilder().WithScheme(newCRDScheme()).Build()
+	knownFn := func() map[string]bool { return map[string]bool{"cluster-a": true} }
+	store := watchlist.NewStore(crdClient, "test-ns", knownFn)
+	store.Put(ctx, "my-app", &v1alpha1.AppWatchConfigSpec{
+		SlackChannel: "#deploys",
+		Clusters:     map[string][]string{"cluster-a": {"prod"}},
+	})
+
+	m.SetWatchlistStore(store)
+
+	// No watchers yet — reconcile Phase 0 should start cluster-a
+	m.mu.Lock()
+	if len(m.watchers) != 0 {
+		t.Fatalf("expected 0 watchers before reconcile, got %d", len(m.watchers))
+	}
+	m.mu.Unlock()
+
+	reconcileOnce(m, ctx)
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if len(m.watchers) != 1 {
+		t.Fatalf("expected 1 watcher after reconcile, got %d", len(m.watchers))
+	}
+	if _, hasA := m.watchers["cluster-a"]; !hasA {
+		t.Error("expected watcher for cluster-a from watchlist")
+	}
+}
+
+func TestReconcile_SkipsAlreadyRunningWatchlistClusters(t *testing.T) {
+	dir := t.TempDir()
+
+	os.WriteFile(filepath.Join(dir, "cluster-a.yaml"),
+		minimalKubeconfig("https://a:6443"), 0644)
+
+	m, _ := newTestManager(t, dir)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	defer m.Stop()
+
+	// Start cluster-a via normal rescan first
+	reconcileOnce(m, ctx)
+
+	m.mu.Lock()
+	firstWatcher := m.watchers["cluster-a"]
+	m.mu.Unlock()
+
+	if firstWatcher == nil {
+		t.Fatal("expected watcher for cluster-a after first reconcile")
+	}
+
+	// Now attach a watchlist store that also desires cluster-a
+	crdClient := ctrlfake.NewClientBuilder().WithScheme(newCRDScheme()).Build()
+	knownFn := func() map[string]bool { return map[string]bool{"cluster-a": true} }
+	store := watchlist.NewStore(crdClient, "test-ns", knownFn)
+	store.Put(ctx, "my-app", &v1alpha1.AppWatchConfigSpec{
+		Clusters: map[string][]string{"cluster-a": {"prod"}},
+	})
+	m.SetWatchlistStore(store)
+
+	// Reconcile again — should NOT restart the watcher
+	reconcileOnce(m, ctx)
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.watchers["cluster-a"] != firstWatcher {
+		t.Error("watchlist reconcile should not restart an already-running watcher")
+	}
+}
+
+func TestReconcile_WatchlistClusterNotInDir(t *testing.T) {
+	dir := t.TempDir()
+
+	// No kubeconfig files — cluster-a is desired but not available
+	m, _ := newTestManager(t, dir)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	defer m.Stop()
+
+	crdClient := ctrlfake.NewClientBuilder().WithScheme(newCRDScheme()).Build()
+	knownFn := func() map[string]bool { return map[string]bool{"cluster-a": true} }
+	store := watchlist.NewStore(crdClient, "test-ns", knownFn)
+	store.Put(ctx, "my-app", &v1alpha1.AppWatchConfigSpec{
+		Clusters: map[string][]string{"cluster-a": {"prod"}},
+	})
+	m.SetWatchlistStore(store)
+
+	reconcileOnce(m, ctx)
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Should not start or crash — cluster not found in dir
+	if len(m.watchers) != 0 {
+		t.Errorf("expected 0 watchers when kubeconfig missing, got %d", len(m.watchers))
+	}
+}
+
+func TestReconcile_TriggeredByChannel(t *testing.T) {
+	dir := t.TempDir()
+
+	os.WriteFile(filepath.Join(dir, "cluster-a.yaml"),
+		minimalKubeconfig("https://a:6443"), 0644)
+
+	m, _ := newTestManager(t, dir)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	defer m.Stop()
+
+	// Set up watchlist store
+	crdClient := ctrlfake.NewClientBuilder().WithScheme(newCRDScheme()).Build()
+	knownFn := func() map[string]bool { return map[string]bool{"cluster-a": true} }
+	store := watchlist.NewStore(crdClient, "test-ns", knownFn)
+	m.SetWatchlistStore(store)
+
+	// Set up trigger channel
+	triggerCh := make(chan struct{}, 1)
+	m.SetReconcileTrigger(triggerCh)
+
+	// Override rescan interval to something huge so the ticker won't fire
+	m.rescanInterval = 1 * time.Hour
+
+	// Start reconcile loop in background
+	go m.reconcileLoop(ctx)
+
+	// Register an app via the store (simulates API handler calling store.Put)
+	store.Put(ctx, "my-app", &v1alpha1.AppWatchConfigSpec{
+		Clusters: map[string][]string{"cluster-a": {"prod"}},
+	})
+
+	// Fire the trigger — this should cause an immediate reconcile
+	triggerCh <- struct{}{}
+
+	// Wait for the watcher to appear
+	deadline := time.After(3 * time.Second)
+	for {
+		m.mu.Lock()
+		count := len(m.watchers)
+		m.mu.Unlock()
+		if count > 0 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for trigger channel to start watcher")
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, hasA := m.watchers["cluster-a"]; !hasA {
+		t.Error("expected watcher for cluster-a after trigger")
 	}
 }

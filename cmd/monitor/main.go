@@ -28,6 +28,7 @@ import (
 	"github.com/koolhandluke/k8s-deploy-monitor-operator/internal/persistence"
 	"github.com/koolhandluke/k8s-deploy-monitor-operator/internal/trace"
 	"github.com/koolhandluke/k8s-deploy-monitor-operator/internal/watcher"
+	"github.com/koolhandluke/k8s-deploy-monitor-operator/internal/watchlist"
 )
 
 // main loads configuration, initializes cluster watchers and dispatch targets,
@@ -105,12 +106,14 @@ func main() {
 	// Set up persistence if enabled
 	var hashStore *persistence.HashStore
 	var recorder *persistence.AuditRecorder
+	var persistClient client.Client
 	if cfg.PersistenceEnabled {
 		c, dynClient, err := initK8sClients(clusters)
 		if err != nil {
 			slog.Error("failed to initialize persistence client", "error", err)
 			os.Exit(1)
 		}
+		persistClient = c
 
 		hashStore = persistence.NewHashStore(c, cfg.PersistenceNamespace)
 		recorder = persistence.NewAuditRecorder(c, cfg.PersistenceNamespace)
@@ -123,6 +126,34 @@ func main() {
 		configWatcher := watcher.NewConfigWatcher(nsFilter, c, dynClient)
 		go configWatcher.Start(ctx)
 		defer configWatcher.Stop()
+	}
+
+	// Watchlist setup (requires persistence)
+	var watchlistStore *watchlist.Store
+	var reconcileTriggerCh chan struct{}
+	if cfg.WatchlistEnabled && cfg.PersistenceEnabled {
+		knownClustersFn := func() map[string]bool {
+			snap, err := config.LoadDirectorySnapshot(cfg.KubeconfigDir)
+			if err != nil {
+				slog.Warn("failed to load directory snapshot for watchlist", "error", err)
+				return nil
+			}
+			result := make(map[string]bool, len(snap.Clusters))
+			for _, c := range snap.Clusters {
+				result[c.ID] = true
+			}
+			return result
+		}
+		watchlistStore = watchlist.NewStore(persistClient, cfg.PersistenceNamespace, knownClustersFn)
+		if err := watchlistStore.LoadAll(ctx); err != nil {
+			slog.Error("failed to load watchlist CRDs", "error", err)
+			os.Exit(1)
+		}
+		reconcileTriggerCh = make(chan struct{}, 1)
+		slog.Info("watchlist enabled", "namespace", cfg.PersistenceNamespace)
+	} else if cfg.WatchlistEnabled && !cfg.PersistenceEnabled {
+		slog.Error("WATCHLIST_ENABLED=true requires PERSISTENCE_ENABLED=true")
+		os.Exit(1)
 	}
 
 	// Event channel between watchers and dispatcher/recorder
@@ -246,17 +277,46 @@ func main() {
 		time.Duration(cfg.WatcherStartTimeoutSeconds)*time.Second,
 	)
 
-	// Wire event enricher for app name + slack channel resolution
-	if nsLookup != nil {
-		manager.SetEventEnricher(func(event *models.RolloutEvent) {
+	// Wire event enricher: watchlist first, then legacy fallback
+	manager.SetEventEnricher(func(event *models.RolloutEvent) {
+		if watchlistStore != nil {
+			if entry, ok := watchlistStore.Lookup(event.ClusterID, event.Namespace); ok {
+				event.App = entry.App
+				event.SlackChannel = entry.SlackChannel
+				return
+			}
+		}
+		if nsLookup != nil {
 			event.App = nsLookup.GetApp(event.ClusterID, event.Namespace)
 			event.SlackChannel = nsLookup.GetSlackChannel(event.ClusterID, event.Namespace, slackRouting)
-		})
+		}
+	})
+
+	// Wire watchlist store and reconcile trigger to manager
+	if watchlistStore != nil {
+		manager.SetWatchlistStore(watchlistStore)
+		manager.SetReconcileTrigger(reconcileTriggerCh)
 	}
 
 	if err := manager.Start(ctx, clusters); err != nil {
 		slog.Error("failed to start watch manager", "error", err)
 		os.Exit(1)
+	}
+
+	// Start watchlist HTTP API server
+	var watchlistServer *http.Server
+	if watchlistStore != nil {
+		wlHandler := watchlist.NewHandler(watchlistStore, reconcileTriggerCh)
+		watchlistServer = &http.Server{
+			Addr:    fmt.Sprintf(":%d", cfg.WatchlistPort),
+			Handler: wlHandler,
+		}
+		go func() {
+			slog.Info("watchlist API enabled", "port", cfg.WatchlistPort)
+			if err := watchlistServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				slog.Error("watchlist API server error", "error", err)
+			}
+		}()
 	}
 
 	// Block on shutdown signal
@@ -265,11 +325,16 @@ func main() {
 	sig := <-sigCh
 
 	slog.Info("shutdown signal received", "signal", sig)
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer shutdownCancel()
 	if statusServer != nil {
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer shutdownCancel()
 		if err := statusServer.Shutdown(shutdownCtx); err != nil {
 			slog.Error("status API shutdown error", "error", err)
+		}
+	}
+	if watchlistServer != nil {
+		if err := watchlistServer.Shutdown(shutdownCtx); err != nil {
+			slog.Error("watchlist API shutdown error", "error", err)
 		}
 	}
 	manager.Stop()

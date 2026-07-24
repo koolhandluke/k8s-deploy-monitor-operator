@@ -137,6 +137,40 @@ spec:
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
+  name: appwatchconfigs.deploy-monitor.io
+spec:
+  group: deploy-monitor.io
+  names:
+    kind: AppWatchConfig
+    listKind: AppWatchConfigList
+    plural: appwatchconfigs
+    singular: appwatchconfig
+    shortNames:
+      - awc
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              properties:
+                slackChannel:
+                  type: string
+                clusters:
+                  type: object
+                  additionalProperties:
+                    type: array
+                    items:
+                      type: string
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
   name: monitorconfigs.deploy-monitor.io
 spec:
   group: deploy-monitor.io

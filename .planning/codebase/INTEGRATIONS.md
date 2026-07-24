@@ -49,6 +49,7 @@
 | `ClusterRolloutState` | Persists template hashes per cluster (survives restarts) | `internal/persistence/hash_store.go` |
 | `RolloutRecord` | Audit trail of detected rollouts with dispatch status | `internal/persistence/audit_recorder.go` |
 | `MonitorConfig` | Runtime-reloadable namespace filtering | `api/v1alpha1/monitor_config.go` |
+| `AppWatchConfig` | Dynamic app watch registrations (watchlist API) | `api/v1alpha1/app_watch_config.go` |
 
 **File Storage:**
 - Kubeconfig files read from `KUBECONFIG_DIR` directory (one file per cluster)
@@ -135,6 +136,7 @@
 
 **Incoming:**
 - Status API (when enabled): `GET /api/v1/investigations` on configurable port
+- Watchlist API (when enabled): `GET/PUT/DELETE /api/v1/watchlist` on port 8080 (configurable via `WATCHLIST_PORT`)
 
 **Outgoing:**
 - Slack Incoming Webhook: `POST {SLACK_WEBHOOK_URL}` (rollout notifications)

@@ -8,6 +8,83 @@ import (
 	runtime "k8s.io/apimachinery/pkg/runtime"
 )
 
+// DeepCopyInto copies all properties into another AppWatchConfig.
+func (in *AppWatchConfig) DeepCopyInto(out *AppWatchConfig) {
+	*out = *in
+	out.TypeMeta = in.TypeMeta
+	in.ObjectMeta.DeepCopyInto(&out.ObjectMeta)
+	in.Spec.DeepCopyInto(&out.Spec)
+}
+
+func (in *AppWatchConfig) DeepCopy() *AppWatchConfig {
+	if in == nil {
+		return nil
+	}
+	out := new(AppWatchConfig)
+	in.DeepCopyInto(out)
+	return out
+}
+
+func (in *AppWatchConfig) DeepCopyObject() runtime.Object {
+	if c := in.DeepCopy(); c != nil {
+		return c
+	}
+	return nil
+}
+
+func (in *AppWatchConfigSpec) DeepCopyInto(out *AppWatchConfigSpec) {
+	*out = *in
+	if in.Clusters != nil {
+		in, out := &in.Clusters, &out.Clusters
+		*out = make(map[string][]string, len(*in))
+		for key, val := range *in {
+			if val != nil {
+				cp := make([]string, len(val))
+				copy(cp, val)
+				(*out)[key] = cp
+			}
+		}
+	}
+}
+
+func (in *AppWatchConfigSpec) DeepCopy() *AppWatchConfigSpec {
+	if in == nil {
+		return nil
+	}
+	out := new(AppWatchConfigSpec)
+	in.DeepCopyInto(out)
+	return out
+}
+
+func (in *AppWatchConfigList) DeepCopyInto(out *AppWatchConfigList) {
+	*out = *in
+	out.TypeMeta = in.TypeMeta
+	in.ListMeta.DeepCopyInto(&out.ListMeta)
+	if in.Items != nil {
+		in, out := &in.Items, &out.Items
+		*out = make([]AppWatchConfig, len(*in))
+		for i := range *in {
+			(*in)[i].DeepCopyInto(&(*out)[i])
+		}
+	}
+}
+
+func (in *AppWatchConfigList) DeepCopy() *AppWatchConfigList {
+	if in == nil {
+		return nil
+	}
+	out := new(AppWatchConfigList)
+	in.DeepCopyInto(out)
+	return out
+}
+
+func (in *AppWatchConfigList) DeepCopyObject() runtime.Object {
+	if c := in.DeepCopy(); c != nil {
+		return c
+	}
+	return nil
+}
+
 // DeepCopyInto copies all properties into another ClusterRolloutState.
 func (in *ClusterRolloutState) DeepCopyInto(out *ClusterRolloutState) {
 	*out = *in

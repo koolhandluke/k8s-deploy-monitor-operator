@@ -25,5 +25,7 @@ func init() {
 		&RolloutRecordList{},
 		&MonitorConfig{},
 		&MonitorConfigList{},
+		&AppWatchConfig{},
+		&AppWatchConfigList{},
 	)
 }

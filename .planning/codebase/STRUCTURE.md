@@ -9,6 +9,7 @@ k8s-deploy-monitor-operator/
 ├── api/
 │   └── v1alpha1/                    # CRD type definitions (Kubernetes API types)
 │       ├── groupversion_info.go     # Scheme registration, GroupVersion
+│       ├── app_watch_config.go      # AppWatchConfig CRD type (watchlist registrations)
 │       ├── monitor_config.go        # MonitorConfig CRD type
 │       ├── types.go                 # ClusterRolloutState, RolloutRecord CRD types
 │       └── zz_generated_deepcopy.go # Auto-generated DeepCopy methods
@@ -89,6 +90,11 @@ k8s-deploy-monitor-operator/
 │   │   ├── audit_recorder.go        # AuditRecorder (RolloutRecord CRUD)
 │   │   ├── hash_store.go            # HashStore (batched ClusterRolloutState writes)
 │   │   └── names.go                 # K8s name sanitization helpers
+│   ├── watchlist/                   # Dynamic app watch registration via HTTP API
+│   │   ├── handler.go               # HTTP handler (GET/PUT/DELETE /api/v1/watchlist)
+│   │   ├── handler_test.go
+│   │   ├── store.go                 # CRD-backed store with in-memory index
+│   │   └── store_test.go
 │   └── trace/
 │       └── level.go                 # Custom slog trace level (-8)
 ├── test/
@@ -107,7 +113,7 @@ k8s-deploy-monitor-operator/
 **`api/v1alpha1/`:**
 - Purpose: Kubernetes CRD type definitions for the deploy-monitor.io API group
 - Contains: Go structs with kubebuilder markers, scheme registration, generated deepcopy
-- Key files: `types.go` (ClusterRolloutState, RolloutRecord), `monitor_config.go` (MonitorConfig)
+- Key files: `types.go` (ClusterRolloutState, RolloutRecord), `monitor_config.go` (MonitorConfig), `app_watch_config.go` (AppWatchConfig)
 
 **`cmd/`:**
 - Purpose: Binary entry points
@@ -143,6 +149,11 @@ k8s-deploy-monitor-operator/
 - Purpose: CRD-based state storage
 - Contains: HashStore (batched template hash persistence), AuditRecorder (RolloutRecord CRUD)
 - Key files: `hash_store.go`, `audit_recorder.go`
+
+**`internal/watchlist/`:**
+- Purpose: Dynamic app watch registration via HTTP API
+- Contains: Store (CRD-backed with in-memory index for O(1) lookups), Handler (REST API)
+- Key files: `store.go` (AppWatchConfig CRD persistence + index), `handler.go` (HTTP endpoints)
 
 **`internal/models/`:**
 - Purpose: Shared data types used across the pipeline
@@ -190,6 +201,7 @@ k8s-deploy-monitor-operator/
 **CRD Types:**
 - `api/v1alpha1/types.go`: ClusterRolloutState, RolloutRecord
 - `api/v1alpha1/monitor_config.go`: MonitorConfig
+- `api/v1alpha1/app_watch_config.go`: AppWatchConfig
 
 **Persistence:**
 - `internal/persistence/hash_store.go`: Batched hash writes to ClusterRolloutState CRDs
@@ -200,6 +212,7 @@ k8s-deploy-monitor-operator/
 - `internal/diagnostic/analyzer_test.go`, `internal/diagnostic/scenarios_test.go`, `internal/diagnostic/soak_test.go`
 - `internal/dispatch/slack_test.go`, `internal/dispatch/slack_bot_test.go`, `internal/dispatch/record_watcher_test.go`
 - `internal/investigation/orchestrator_test.go`, `internal/investigation/slack_reporter_test.go`
+- `internal/watchlist/store_test.go`, `internal/watchlist/handler_test.go`
 - `internal/diagnostic/testdata/`: YAML fixtures for test scenarios
 
 ## Naming Conventions

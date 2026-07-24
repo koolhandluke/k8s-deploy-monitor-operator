@@ -68,6 +68,8 @@ type Config struct {
 	InvestigationMaxConcurrent int               `yaml:"investigationMaxConcurrent"`
 	DiagnosticEnabled          bool              `yaml:"diagnosticEnabled"`
 	DiagnosticMaxConcurrent    int               `yaml:"diagnosticMaxConcurrent"`
+	WatchlistEnabled           bool              `yaml:"watchlistEnabled"`
+	WatchlistPort              int               `yaml:"watchlistPort"`
 
 	// --- Dispatcher only ---
 	RolloutRecordTTLDays int `yaml:"rolloutRecordTTLDays"`
@@ -188,6 +190,8 @@ func loadFromEnvVars(c *Config) {
 	c.PersistenceEnabled = strings.ToLower(os.Getenv("PERSISTENCE_ENABLED")) == "true"
 	c.DispatcherSplit = strings.ToLower(os.Getenv("DISPATCHER_SPLIT")) == "true"
 	c.DiagnosticEnabled = strings.ToLower(os.Getenv("DIAGNOSTIC_ENABLED")) == "true"
+	c.WatchlistEnabled = strings.ToLower(os.Getenv("WATCHLIST_ENABLED")) == "true"
+	c.WatchlistPort = envInt("WATCHLIST_PORT", 0)
 
 	c.PersistenceNamespace = os.Getenv("PERSISTENCE_NAMESPACE")
 }
@@ -232,6 +236,9 @@ func applyDefaults(c *Config) {
 	}
 	if c.DiagnosticMaxConcurrent == 0 {
 		c.DiagnosticMaxConcurrent = 10
+	}
+	if c.WatchlistPort == 0 {
+		c.WatchlistPort = 8080
 	}
 
 	// Backward compat: map DISPATCH_MODE to InvestigationMode if not set

@@ -15,6 +15,7 @@ import (
 	"github.com/koolhandluke/k8s-deploy-monitor-operator/internal/config"
 	"github.com/koolhandluke/k8s-deploy-monitor-operator/internal/models"
 	"github.com/koolhandluke/k8s-deploy-monitor-operator/internal/persistence"
+	"github.com/koolhandluke/k8s-deploy-monitor-operator/internal/watchlist"
 )
 
 // hashObserverAdapter adapts a HashStore to the HashObserver interface.
@@ -74,12 +75,14 @@ type Manager struct {
 	startTimeout     time.Duration
 	clientsetFactory ClientsetFactory
 
-	mu             sync.Mutex
-	watchers       map[string]*ClusterWatcher // clusterID → watcher
-	fileHashes     map[string]string          // clusterID → file content hash
-	pendingRetry   map[string]*retryEntry     // clusterID → retry state
-	observer       HashObserver
-	eventEnricher  func(*models.RolloutEvent) // enriches events with app/channel; nil-safe
+	mu               sync.Mutex
+	watchers         map[string]*ClusterWatcher // clusterID → watcher
+	fileHashes       map[string]string          // clusterID → file content hash
+	pendingRetry     map[string]*retryEntry     // clusterID → retry state
+	observer         HashObserver
+	eventEnricher    func(*models.RolloutEvent) // enriches events with app/channel; nil-safe
+	watchlistStore   *watchlist.Store           // nil if watchlist not enabled
+	reconcileTrigger <-chan struct{}            // signals immediate reconcile from API
 }
 
 // NewManager creates a Manager that watches the given clusters for deployment
@@ -117,6 +120,24 @@ func NewManager(
 // and Slack channel. Must be called before Start.
 func (m *Manager) SetEventEnricher(fn func(*models.RolloutEvent)) {
 	m.eventEnricher = fn
+}
+
+// SetWatchlistStore configures the watchlist store for dynamic app registrations.
+// Must be called before Start.
+func (m *Manager) SetWatchlistStore(store *watchlist.Store) {
+	m.watchlistStore = store
+}
+
+// SetReconcileTrigger configures a channel that triggers immediate reconciliation
+// when the watchlist API registers or removes an app. Must be called before Start.
+func (m *Manager) SetReconcileTrigger(ch <-chan struct{}) {
+	m.reconcileTrigger = ch
+}
+
+// reconcileTriggerCh returns the trigger channel or nil.
+// A nil channel blocks forever in select, disabling the case.
+func (m *Manager) reconcileTriggerCh() <-chan struct{} {
+	return m.reconcileTrigger
 }
 
 // Start launches a watcher per cluster with staggered startup (1s between clusters).
@@ -249,15 +270,24 @@ func (m *Manager) reconcileLoop(ctx context.Context) {
 			return
 		case <-ticker.C:
 			m.reconcile(ctx, &lastRescan)
+		case <-m.reconcileTriggerCh():
+			slog.Info("reconcile triggered by watchlist API")
+			m.reconcile(ctx, &lastRescan)
 		}
 	}
 }
 
-// reconcile runs three phases per tick:
+// reconcile runs four phases per tick:
+// 0. Ensure watchlist-desired clusters have watchers (if watchlist enabled)
 // 1. Rescan directory for file changes (if enough time has passed)
 // 2. Health-check running watchers
 // 3. Retry pending clusters
 func (m *Manager) reconcile(ctx context.Context, lastRescan *time.Time) {
+	// Phase 0: Ensure watchlist-desired clusters have watchers
+	if m.watchlistStore != nil {
+		m.ensureWatchlistClusters(ctx)
+	}
+
 	// Phase 1: Rescan directory for file changes
 	if m.kubeconfigDir != "" && m.rescanInterval > 0 && time.Since(*lastRescan) >= m.rescanInterval {
 		m.rescanDirectory(ctx)
@@ -363,6 +393,62 @@ func (m *Manager) reconcile(ctx context.Context, lastRescan *time.Time) {
 			"pending_retries", len(m.pendingRetry),
 		)
 	}
+}
+
+// ensureWatchlistClusters starts watchers for clusters requested by the watchlist
+// that are not already running or pending retry.
+func (m *Manager) ensureWatchlistClusters(ctx context.Context) {
+	desired := m.watchlistStore.DesiredClusters()
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for clusterID := range desired {
+		if _, running := m.watchers[clusterID]; running {
+			continue
+		}
+		if _, pending := m.pendingRetry[clusterID]; pending {
+			continue
+		}
+
+		cluster, err := m.loadClusterFromDir(clusterID)
+		if err != nil {
+			slog.Warn("watchlist cluster not available in kubeconfig dir",
+				"cluster", clusterID, "error", err)
+			continue
+		}
+
+		if err := m.startWatcherLocked(ctx, cluster); err != nil {
+			slog.Warn("failed to start watchlist cluster watcher",
+				"cluster", clusterID, "error", err)
+			backoff := retryBackoff(0)
+			m.pendingRetry[clusterID] = &retryEntry{
+				cluster:   cluster,
+				attempt:   0,
+				nextRetry: time.Now().Add(backoff),
+				lastError: err.Error(),
+			}
+		} else {
+			slog.Info("watcher started for watchlist cluster", "cluster", clusterID)
+		}
+	}
+}
+
+// loadClusterFromDir loads a single cluster's config from the kubeconfig directory.
+func (m *Manager) loadClusterFromDir(clusterID string) (config.ClusterInfo, error) {
+	if m.kubeconfigDir == "" {
+		return config.ClusterInfo{}, fmt.Errorf("no kubeconfig dir configured")
+	}
+	snap, err := config.LoadDirectorySnapshot(m.kubeconfigDir)
+	if err != nil {
+		return config.ClusterInfo{}, fmt.Errorf("loading directory snapshot: %w", err)
+	}
+	for _, c := range snap.Clusters {
+		if c.ID == clusterID {
+			return c, nil
+		}
+	}
+	return config.ClusterInfo{}, fmt.Errorf("cluster %q not found in kubeconfig dir", clusterID)
 }
 
 // rescanDirectory re-reads the kubeconfig directory and starts/stops/recycles watchers.

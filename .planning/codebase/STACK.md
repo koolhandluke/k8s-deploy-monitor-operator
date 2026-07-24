@@ -31,7 +31,8 @@
 **Testing:**
 - Go standard `testing` package
 - `k8s.io/client-go/kubernetes/fake` - Fake Kubernetes clientsets for unit tests
-- `net/http/httptest` - HTTP test servers for dispatch target tests
+- `sigs.k8s.io/controller-runtime/pkg/client/fake` - Fake controller-runtime client for CRD store tests (watchlist)
+- `net/http/httptest` - HTTP test servers for dispatch target and watchlist API tests
 
 **Build/Dev:**
 - `go build` - Direct compilation, no build framework

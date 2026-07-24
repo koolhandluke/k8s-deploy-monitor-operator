@@ -136,7 +136,7 @@ func TestCheckFailureConditions(t *testing.T) {
 
 **Framework:** No mocking framework. Hand-written test doubles.
 
-**Kubernetes fake clientsets** (`k8s.io/client-go/kubernetes/fake`):
+**Kubernetes fake clientsets** (`k8s.io/client-go/kubernetes/fake`, `sigs.k8s.io/controller-runtime/pkg/client/fake` for CRD stores):
 ```go
 deploy := makeDeployment("myapp", "default", "myapp:v1")
 clientset := fake.NewSimpleClientset(deploy)
@@ -271,6 +271,8 @@ go tool cover -html=coverage.out
 **Integration-style Tests (in-process):**
 - Watcher tests with fake clientsets: `TestClusterWatcher_DetectsRollout` — starts a real informer against a fake API
 - Manager reconcile tests: `TestReconcile_AddsNewCluster` — uses temp directories and fake clientset factories
+- Watchlist integration tests: `TestReconcile_StartsWatchlistClusters`, `TestReconcile_TriggeredByChannel` — verifies dynamic reloading via watchlist store and trigger channel
+- Watchlist store/handler tests: `TestPut_Conflict`, `TestHandler_PUT_PartialAcceptance` — uses controller-runtime fake client and httptest
 - Orchestrator lifecycle tests: `TestOrchestrator_StopDrains` — verifies goroutine lifecycle
 
 **E2E Tests:**
