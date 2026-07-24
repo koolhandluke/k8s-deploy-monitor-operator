@@ -1,54 +1,190 @@
-# Local Development & Testing
+<!-- generated-by: gsd-doc-writer -->
+# Testing
 
-## Prerequisites
+## Test framework and setup
 
-- minikube (or any local k8s cluster)
-- Helm 3
-- Docker (for building the image)
+The project uses the Go standard library `testing` package — no third-party test framework. Tests are in-process and require no running cluster or external services.
 
-All commands below assume you are in the repo root:
+Dependencies used in tests:
+- `k8s.io/client-go/kubernetes/fake` — in-memory Kubernetes clientset for watcher and diagnostic tests
+- `net/http/httptest` — local HTTP server for Slack and Holmes dispatch target tests
+- `k8s.io/client-go/rest` — minimal REST config construction for cluster registry tests
+
+No `envtest`, no live cluster, and no Docker is required to run the unit tests.
+
+## Running tests
+
+Run the full suite:
 
 ```bash
-cd ~/git/k8s-deploy-monitor-operator
+go test ./...
 ```
 
-## Build the image
+Run with the race detector (recommended — the codebase uses concurrent maps, atomic counters, and timers):
 
 ```bash
-# Build locally
+go test ./... -race
+```
+
+Run a single package:
+
+```bash
+go test ./internal/watcher/
+go test ./internal/diagnostic/
+go test ./internal/dispatch/
+go test ./internal/investigation/
+go test ./internal/config/
+```
+
+Run a single test by name:
+
+```bash
+go test ./internal/watcher/ -run TestClusterWatcher_DetectsRollout -v
+go test ./internal/diagnostic/ -run TestCheckFailureConditions -v
+go test ./internal/investigation/ -run TestOrchestrator_SupersedeCancellation -v
+```
+
+## Test file naming and structure
+
+Test files follow the standard Go convention: `{package}_test.go` or `{feature}_test.go`, co-located with the package they test. The `package` declaration uses the package under test (white-box access) rather than an external `_test` package.
+
+| Package | Test files | What they cover |
+|---------|------------|-----------------|
+| `internal/watcher` | `informer_test.go`, `debouncer_test.go`, `manager_test.go` | Rollout detection, debouncing, multi-cluster reconcile loop |
+| `internal/diagnostic` | `analyzer_test.go`, `diagnostics_test.go`, `scenarios_test.go`, `soak_test.go`, `monitor_test.go`, `fixtures_test.go` | Failure condition detection, pod status collection, event filtering |
+| `internal/dispatch` | `slack_test.go`, `slack_bot_test.go`, `record_watcher_test.go`, `ttl_cleaner_test.go` | Slack webhook target, Slack bot target, dispatch helpers |
+| `internal/investigation` | `orchestrator_test.go`, `slack_reporter_test.go` | Investigation lifecycle, supersede cancellation, concurrency limit |
+| `internal/config` | `config_test.go`, `kubeconfig_test.go`, `env_config_test.go` | Env var loading, kubeconfig parsing, per-app env config, Slack routing |
+
+## Key test patterns
+
+**Fake clientsets** — watcher and diagnostic tests use `fake.NewSimpleClientset(objects...)` to pre-seed in-memory state. Tests update the fake clientset via `clientset.AppsV1().Deployments(ns).Update(...)` to trigger watcher callbacks without a live cluster.
+
+**httptest servers** — Slack and Holmes dispatch tests spin up a local `httptest.NewServer` and point the target at it. This verifies the exact HTTP method, headers, and body sent without needing external services.
+
+**Test doubles** — investigation tests use `fakeInvestigator` and `fakeReporter` structs that implement the `Investigator` and `Reporter` interfaces, with configurable delays and recorded calls.
+
+**Temp directories** — manager tests use `t.TempDir()` to write minimal kubeconfig YAML files and verify that the reconcile loop picks up adds, removes, and file hash changes.
+
+**YAML fixtures** — diagnostic tests in `internal/diagnostic/testdata/` contain YAML-encoded Kubernetes objects (Deployments, ReplicaSets, Pods, Events) for reproducible failure scenarios such as `PodCrashloop`, `PodOOMKilled`, `PodConfigError`, `PodInvalidImage`, and `PodInitCrash`.
+
+## What the unit tests cover
+
+**Rollout detection (`internal/watcher`)**
+- `TestClusterWatcher_DetectsRollout` — image update in `spec.template` emits a `RolloutEvent`
+- `TestClusterWatcher_IgnoresStatusUpdates` — status-only changes produce no event
+- `TestClusterWatcher_NamespaceFilter` — updates in filtered namespaces are suppressed
+- `TestTemplateHash_*` — SHA256 hashing is stable and differentiates image changes
+- `TestHealthStatus_*` — consecutive error counting, permanent error flag, counter reset
+
+**Debouncer (`internal/watcher`)**
+- `TestDebouncer_ReplacesEvent` — rapid submits for the same key coalesce to the latest event
+- `TestDebouncer_IndependentKeys` — different deployment keys are debounced independently
+- `TestDebouncer_Stop` — pending timers are cancelled on `Stop()`
+
+**Manager reconcile loop (`internal/watcher`)**
+- `TestReconcile_AddsNewCluster`, `_RemovesCluster`, `_RecyclesChangedCluster` — kubeconfig directory changes are reflected in running watchers
+- `TestReconcile_NoRestartOnUnchanged` — unchanged kubeconfig files do not restart watchers
+- `TestStartup_FailedClusterQueuesRetry` — a failing clientset factory queues the cluster for retry instead of returning an error
+- `TestRetryBackoff` — exponential backoff sequence (10s→20s→40s→80s→160s→5m cap)
+
+**Failure detection (`internal/diagnostic`)**
+- `TestCheckFailureConditions` — table-driven test covering ProgressDeadlineExceeded, CrashLoop restart threshold, CreateContainerConfigError time window, InvalidImageName, OOMKilled under threshold, and healthy baseline
+- `TestConfigErrorTimerResets` — config-error timer resets when containers leave the Waiting state
+- `TestGatherDiagnostics_*` — pod status collection, init container detection, event filtering by name prefix, log snippet collection for failing pods
+- `TestIsPodFailing` — all failing conditions: CrashLoopBackOff, ImagePullBackOff, OOMKilled, restarts > 0
+
+**Investigation orchestrator (`internal/investigation`)**
+- `TestOrchestrator_SupersedeCancellation` — second investigate call for the same key cancels the in-flight first via context
+- `TestOrchestrator_ConcurrencyLimit` — third simultaneous investigation is dropped when semaphore is full
+- `TestOrchestrator_StopDrains` — `Stop()` waits for all goroutines before returning
+
+**Dispatch targets (`internal/dispatch`)**
+- `TestSlackTarget_Dispatch` — POST body contains cluster name, deployment name, and new image
+- `TestSlackBotTarget_Dispatch` — Bearer token header set, channel routed correctly
+- `TestSlackBotTarget_EmptyChannel_Skips` — no HTTP request made when `SlackChannel` is empty
+
+**Config (`internal/config`)**
+- `TestLoadEnvConfigs` — per-app YAML config parses cluster and namespace mappings
+- `TestBuildNamespaceLookup` / `TestNamespaceLookup_GetSlackChannel` — namespace-to-app and app-to-Slack-channel lookups
+
+## Coverage requirements
+
+No coverage thresholds are configured. There is no `.nycrc`, `coverageThreshold` in a Jest config, or equivalent Go coverage enforcement in CI. To generate a coverage report locally:
+
+```bash
+go test ./... -coverprofile=coverage.out
+go tool cover -html=coverage.out
+```
+
+## CI integration
+
+No CI pipeline is configured in this repository (no `.github/workflows/` or equivalent). Tests are run manually as described above.
+
+## E2E tests
+
+The automated E2E test suite validates the full investigation pipeline against a local minikube cluster.
+
+**Prerequisites:** minikube running, `kubectl`, `helm`, `jq` installed.
+
+```bash
+./test/e2e.sh
+```
+
+The script builds the Docker image, loads it into minikube, deploys via Helm with `investigation.mode=runbook` and `logging.trace=true`, then runs 6 scenarios:
+
+| # | Scenario | Trigger | Expected result |
+|---|----------|---------|-----------------|
+| 1 | Healthy rollout | `nginx:1.25` → `nginx:1.26` | `SUCCESS` |
+| 2 | Bad image tag | `nginx:doesnotexist` | `FAILED` |
+| 3 | CrashLoopBackOff | `busybox:1.36` (exits immediately) | `FAILED` |
+| 4 | Missing ConfigMap | `envFrom` referencing non-existent ConfigMap | `FAILED` |
+| 5 | Deleted mid-rollout | Deployment deleted during investigation | `DELETED` |
+| 6 | Supersede | Two rapid image changes; first cancelled | Log + status API both checked |
+
+Tests 1-5 assert results via the status API (`GET /api/v1/investigations/{ns}/{name}`). Test 6 also greps monitor logs for `"superseding in-flight investigation"`.
+
+**E2E environment variables:**
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `E2E_NAMESPACE` | `e2e-test` | Namespace for test deployments |
+| `E2E_RELEASE` | `deploy-monitor` | Helm release name |
+| `E2E_RELEASE_NS` | `rollout-monitor` | Namespace for the monitor |
+| `E2E_TEST_TIMEOUT` | `240` | Per-test timeout in seconds |
+| `E2E_LOCAL_PORT` | `18081` | Local port for status API port-forward |
+
+## Manual integration testing
+
+### Build and deploy locally
+
+```bash
+# Build image
 docker build -t rollout-monitor:latest .
 
 # Load into minikube
 minikube image load rollout-monitor:latest
-```
 
-## Deploy
-
-```bash
-# Idempotent — installs or upgrades
+# Deploy (basic — log dispatch only)
 helm upgrade --install deploy-monitor ./chart/deploy-monitor/ \
   --namespace rollout-monitor \
   --set image.repository=rollout-monitor \
   --set image.pullPolicy=Never
 ```
 
-## Deploy with non-agentic investigation (runbook mode)
-
-Runbook mode runs the built-in diagnostic runbook on every rollout: it polls the
-Deployment every 10s, detects failures (CrashLoopBackOff, ImagePullBackOff,
-ProgressDeadlineExceeded, stalls, etc.), gathers events/pod status/logs, and
-posts a failure report to Slack. No external AI service required.
+### Trigger a test rollout
 
 ```bash
-helm upgrade --install deploy-monitor ./chart/deploy-monitor/ \
-  --namespace rollout-monitor \
-  --set image.repository=rollout-monitor \
-  --set image.pullPolicy=Never \
-  --set investigation.mode=runbook \
-  --set dispatch.slackWebhookUrl=https://hooks.slack.com/services/YOUR/WEBHOOK/URL
+kubectl create deployment test-rollout --image=nginx:1.25 -n default
+kubectl set image deployment/test-rollout nginx=nginx:1.26 -n default
+
+# Events appear after the 30s debounce window
+kubectl logs -n rollout-monitor -l app.kubernetes.io/name=deploy-monitor -f
 ```
 
-To test without Slack (dumps the full report payload to stdout):
+### Trigger a failing rollout (runbook investigation)
+
+Deploy with investigation mode enabled:
 
 ```bash
 helm upgrade --install deploy-monitor ./chart/deploy-monitor/ \
@@ -59,111 +195,57 @@ helm upgrade --install deploy-monitor ./chart/deploy-monitor/ \
   --set dispatch.slackWebhookUrl=TEST
 ```
 
-> **Note:** Setting `SLACK_WEBHOOK_URL=TEST` enables test mode — the
-> `SlackReporter` logs the full Block Kit JSON payload to stdout instead
-> of posting to Slack.
-
-### Trigger a failing rollout (runbook investigation)
+Setting `SLACK_WEBHOOK_URL=TEST` enables test mode — the `SlackReporter` logs the full Block Kit JSON payload to stdout instead of posting to Slack.
 
 ```bash
-# Create a deployment with a valid image
 kubectl create deployment test-fail --image=nginx:1.25 -n default
 
-# Wait for it to stabilise, then trigger a rollout with a bad image
+# Bad image — triggers ImagePullBackOff
 kubectl set image deployment/test-fail nginx=nginx:doesnotexist -n default
 
-# Watch the monitor logs — after the 30s debounce you should see:
-#   1. "investigation started" with mode=runbook
-#   2. Poll logs every 10s (generation gate, failure checks)
-#   3. "investigation complete" with result=FAILED and diagnostic details
-kubectl logs -n rollout-monitor -l app.kubernetes.io/name=deploy-monitor -f
-```
-
-Other failure scenarios to try:
-
-```bash
-# CrashLoopBackOff — container starts but exits immediately
+# CrashLoopBackOff — container exits immediately
 kubectl set image deployment/test-fail nginx=busybox -n default
-# (busybox exits immediately since there's no long-running command)
 
 # Missing ConfigMap — CreateContainerConfigError
 kubectl patch deployment test-fail -n default --type=json \
   -p='[{"op":"add","path":"/spec/template/spec/containers/0/envFrom","value":[{"configMapRef":{"name":"does-not-exist"}}]}]'
 ```
 
-Clean up test deployments:
+After the 30s debounce window, monitor logs show investigation progress (poll every 10s) and a final result.
+
+### Investigation status API
+
+When deployed with `logging.trace=true`, the monitor exposes a status API on port 8081:
 
 ```bash
-kubectl delete deployment test-fail -n default
-```
-
-## Investigation Status API (trace mode)
-
-When deployed with `logging.trace=true` and an investigation mode enabled, the monitor exposes a lightweight HTTP API on port 8081 for inspecting investigation results:
-
-```bash
-# Port-forward to the status API
 kubectl port-forward deploy/deploy-monitor-deploy-monitor 8081:8081 -n rollout-monitor
 
-# List all investigation results
+# List all results
 curl localhost:8081/api/v1/investigations
 
-# Query a specific deployment (matches by namespace/name suffix)
-curl localhost:8081/api/v1/investigations/default/nginx
+# Query a specific deployment
+curl localhost:8081/api/v1/investigations/default/test-fail
 ```
 
 Response shape:
 
 ```json
 {
-  "deployment_key": "minikube/default/nginx",
-  "result": "SUCCESS",
-  "failure_reason": "",
-  "duration": "62s",
-  "timestamp": "2026-07-20T12:00:00Z"
+  "deployment_key": "minikube/default/test-fail",
+  "result": "FAILED",
+  "failure_reason": "CrashLoopBackOff: restart threshold exceeded",
+  "duration": "45s",
+  "timestamp": "2026-07-23T12:00:00Z"
 }
 ```
 
-The cache stores the last result per deployment key. It has zero cost when trace is disabled — no `StatusCache` is allocated and no HTTP server starts.
-
-## E2E Tests
-
-The automated E2E test suite validates the investigation pipeline against a local minikube cluster:
+### Deploy with Holmes dispatch
 
 ```bash
-./test/e2e.sh
-```
-
-This builds the image, deploys via Helm with `investigation.mode=runbook` and `logging.trace=true`, then runs 6 scenarios:
-
-1. **Healthy rollout** — image update succeeds, expects `SUCCESS`
-2. **Bad image tag** — non-existent image, expects `FAILED`
-3. **CrashLoopBackOff** — container exits immediately, expects `FAILED`
-4. **Missing ConfigMap** — references non-existent ConfigMap, expects `FAILED`
-5. **Deleted mid-rollout** — deployment deleted during investigation, expects `DELETED`
-6. **Supersede** — two rapid image changes, first cancelled, second completes
-
-Tests 1-5 validate results via the status API (`curl /api/v1/investigations/{ns}/{name}`). Test 6 also checks logs for the supersede cancellation message.
-
-Environment variable overrides:
-
-| Var | Default | Description |
-|-----|---------|-------------|
-| `E2E_NAMESPACE` | `e2e-test` | Namespace for test deployments |
-| `E2E_RELEASE` | `deploy-monitor` | Helm release name |
-| `E2E_RELEASE_NS` | `rollout-monitor` | Namespace for the monitor |
-| `E2E_TEST_TIMEOUT` | `240` | Per-test timeout in seconds |
-| `E2E_LOCAL_PORT` | `18081` | Local port for status API port-forward |
-
-## Deploy with Holmes dispatch
-
-To test Holmes dispatch locally, first deploy HolmesGPT on the same cluster:
-
-```bash
-# Add the Robusta Helm repo (if not already added)
+# Add Robusta Helm repo
 helm repo add robusta https://robusta-charts.storage.googleapis.com && helm repo update
 
-# Create a secret with your LLM API key
+# Create secret with LLM API key
 kubectl create secret generic holmes-api-key \
   --from-literal=ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY \
   -n rollout-monitor
@@ -176,13 +258,8 @@ helm upgrade --install holmes robusta/holmes \
   --set 'additionalEnvVars[0].valueFrom.secretKeyRef.key=ANTHROPIC_API_KEY' \
   --set 'additionalEnvVars[1].name=MODEL' \
   --set 'additionalEnvVars[1].value=anthropic/claude-sonnet-4-5-20250929'
-```
 
-The Holmes service will be available at `http://holmes-holmes.rollout-monitor:80`.
-
-Then deploy the monitor pointing at it:
-
-```bash
+# Deploy monitor pointing at Holmes
 helm upgrade --install deploy-monitor ./chart/deploy-monitor/ \
   --namespace rollout-monitor \
   --set image.repository=rollout-monitor \
@@ -192,67 +269,25 @@ helm upgrade --install deploy-monitor ./chart/deploy-monitor/ \
   --set dispatch.slackWebhookUrl=https://hooks.slack.com/services/YOUR/WEBHOOK/URL
 ```
 
-Holmes API calls take 30-60s (LLM inference + tool calls). Check the monitor logs for `dispatched to holmes` with status 200 to confirm the integration is working.
-
-## Trigger a test rollout
+Holmes API calls take 30-60s (LLM inference + tool calls). Confirm with:
 
 ```bash
-# Create a deployment
-kubectl create deployment test-rollout --image=nginx:1.25 -n default
-
-# Update the image (triggers rollout detection)
-kubectl set image deployment/test-rollout nginx=nginx:1.26 -n default
-
-# Check monitor logs (events appear after the 30s debounce window)
 kubectl logs -n rollout-monitor -l app.kubernetes.io/name=deploy-monitor -f
+# Look for: "dispatched to holmes" with status 200
 ```
 
-## Verify CRDs
+### Verify CRDs
 
 ```bash
-# Check ClusterRolloutState (hash baselines per cluster)
-kubectl get crs -n rollout-monitor
-
-# Check RolloutRecords (audit trail)
-kubectl get rr -n rollout-monitor
+kubectl get crs -n rollout-monitor   # ClusterRolloutState (hash baselines per cluster)
+kubectl get rr -n rollout-monitor    # RolloutRecord (audit trail)
 ```
 
-## Uninstall
+### Uninstall
 
 ```bash
 helm uninstall deploy-monitor -n rollout-monitor
 
-# CRDs are NOT removed by helm uninstall (by design).
-# To remove them manually:
+# CRDs are not removed by helm uninstall — remove manually if needed
 kubectl delete crd clusterrolloutstates.deploy-monitor.io rolloutrecords.deploy-monitor.io
 ```
-
-## Values Reference
-
-| Key | Default | Description |
-|-----|---------|-------------|
-| `image.repository` | `ghcr.io/koolhandluke/k8s-deploy-monitor-operator` | Container image |
-| `image.tag` | `latest` | Image tag |
-| `image.pullPolicy` | `IfNotPresent` | Pull policy (`Never` for local builds) |
-| `dispatch.mode` | `log` | `log`, `holmes`, `slack`, or `both` |
-| `dispatch.holmesApiUrl` | `""` | Holmes API endpoint (required for `holmes`/`both`) |
-| `dispatch.slackWebhookUrl` | `""` | Slack webhook (required for `slack`/`both`) |
-| `namespaceFilter.allowlist` | `[]` | If set, only watch these namespaces |
-| `namespaceFilter.denylist` | `[kube-system, kube-public, kube-node-lease]` | Ignored when allowlist is set |
-| `investigation.mode` | `none` | `none`, `runbook`, or `holmes` — post-rollout investigation mode |
-| `investigation.maxConcurrent` | `10` | Max concurrent investigations |
-| `logging.debug` | `false` | Enable debug-level logging |
-| `logging.trace` | `false` | Enable trace-level logging and status API |
-| `logging.statusAPIPort` | `8081` | Status API port (only active when trace=true) |
-| `persistence.enabled` | `true` | CRD-based hash persistence and audit records |
-| `persistence.namespace` | `""` | Namespace for CRs (defaults to release namespace) |
-| `tuning.workerCount` | `3` | Dispatcher worker pool size |
-| `tuning.debounceSeconds` | `30` | Per-deployment coalescing window |
-| `tuning.queueMaxSize` | `100` | Event queue depth before dropping |
-| `resources.requests.cpu` | `50m` | CPU request |
-| `resources.requests.memory` | `64Mi` | Memory request |
-| `resources.limits.cpu` | `200m` | CPU limit |
-| `resources.limits.memory` | `128Mi` | Memory limit |
-| `serviceAccount.create` | `true` | Create a ServiceAccount |
-| `serviceAccount.name` | `""` | Override ServiceAccount name |
-| `namespace.create` | `false` | Create the namespace |

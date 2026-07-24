@@ -1,355 +1,264 @@
+<!-- generated-by: gsd-doc-writer -->
 # Architecture
 
-## Overview
+## System Overview
 
-The deploy monitor is a standalone Go service that watches Kubernetes Deployment rollouts across one or more clusters and dispatches events to configurable targets (stdout, Holmes API, Slack). It detects rollouts by hashing the pod template spec — only actual template changes (image, env, volume) trigger events, not status updates or scale changes.
+The deploy monitor is a standalone Go service that watches Kubernetes Deployment rollouts across one or more clusters and dispatches events to configurable targets (stdout, Slack, Holmes AI, or a built-in runbook investigator). It detects rollouts by hashing `spec.template` — only actual template changes (image, env, volume) trigger events, not status updates or scale changes. The system is read-only with respect to watched clusters; it only writes its own CRDs (`ClusterRolloutState`, `RolloutRecord`, `MonitorConfig`) when persistence is enabled.
 
-## Operational Flow
+Two deployment modes exist: **combined mode** (the monitor detects and dispatches directly) and **split mode** (`DISPATCHER_SPLIT=true`), where the monitor writes `RolloutRecord` CRDs and a separate dispatcher binary handles notifications. Split mode enables independent scaling and upgrade of the detection and dispatch concerns.
 
-Step-by-step lifecycle from operator startup through rollout detection and dispatch.
-
-### 1. Operator Starts
-
-The monitor process starts, loads configuration from environment variables, and builds a `*rest.Config` per cluster from mounted kubeconfigs (or the current kubeconfig context in local dev mode).
-
-If persistence is enabled, it connects to the central cluster's API server and reads any existing `ClusterRolloutState` CRDs to recover previously cached template hashes.
-
-### 2. LIST All Deployments
-
-For each cluster, the monitor creates a `SharedInformerFactory` and starts it. The informer issues a LIST request to the cluster's API server, returning every `apps/v1/Deployment` across all (non-filtered) namespaces.
-
-Each Deployment from the LIST triggers the `AddFunc` handler, which computes `SHA256(json(deployment.Spec.Template))` and stores it in the in-memory `templateCache`:
+## Component Diagram
 
 ```
-templateCache["minikube/default/checkout"]    = "aaa111..."
-templateCache["minikube/default/payments"]    = "bbb222..."
-templateCache["minikube/production/api"]      = "ccc333..."
+kubeconfigs → Manager → ClusterWatcher (1 per cluster) → Debouncer → eventCh → Dispatcher → Targets
+               ↕                ↕                                                    ↕
+         reconcileLoop    HashStore (CRD)                                    AuditRecorder (CRD)
+                           ConfigWatcher ← MonitorConfig CRD
+
+
+                  [Split mode: separate binary]
+                  RolloutRecord CRDs → RecordWatcher → StandaloneDispatcher → Targets
 ```
 
-This is the baseline. No rollout events are emitted — the monitor is just learning the current state of the world.
+**Key packages:**
 
-If persisted hashes were loaded in step 1, the `AddFunc` compares the LIST hash against the persisted hash. A mismatch means a rollout happened while the monitor was down — this is detected and dispatched as a gap-detection event.
+- `cmd/monitor/` — combined monitor binary; wires all components
+- `cmd/dispatcher/` — standalone dispatcher binary for split mode
+- `internal/config/` — YAML config loading with env var overrides; cluster credential loading; env-config and Slack routing
+- `internal/watcher/` — `Manager` + `ClusterWatcher`; rollout detection via template hashing; `Debouncer`; `NamespaceFilter`; `ConfigWatcher`
+- `internal/dispatch/` — `Dispatcher` worker pool; `Target` interface; `LogTarget`, `SlackTarget`, `SlackBotTarget`, `AuditTarget`; `RecordWatcher` (split mode); `TTLCleaner`
+- `internal/investigation/` — `Orchestrator` for concurrent investigations with supersede semantics; `RunbookInvestigator`; `HolmesInvestigator`; `SlackReporter`; `StatusCache` + HTTP status API
+- `internal/diagnostic/` — `RolloutAnalyzer` implementing the two-phase runbook; `ClusterRegistry`; `DiagnosticReport`
+- `internal/persistence/` — `HashStore` (batched CRD writes); `AuditRecorder`
+- `internal/models/` — `RolloutEvent` shared struct
+- `api/v1alpha1/` — CRD types: `ClusterRolloutState`, `RolloutRecord`, `MonitorConfig`
 
-### 3. Start Watch
+## Data Flow
 
-After the LIST completes and the cache is synced, the informer transitions to a long-lived WATCH connection. The API server streams change events for Deployments in real time. The informer handles reconnects, backoff, and bookmark events automatically.
+A typical rollout event moves through the system as follows:
 
-The monitor is now live — any Deployment change on the cluster will arrive as an event.
+1. **Config load** — On startup `config.Load()` reads `/etc/rollout-monitor/config.yaml` (or `CONFIG_FILE`), then applies env var overrides for secrets. Optional per-app env configs (`ENV_CONFIG_DIR`) and Slack routing files (`SLACK_ROUTING_FILE`) are loaded to enable app-name resolution and per-channel Slack routing.
 
-### 4. Event Received (UpdateFunc Triggers)
+2. **Cluster credential loading** — `config.LoadClusters()` reads kubeconfig files from `KUBECONFIG_DIR`. Each filename stem becomes the cluster ID. A `*rest.Config` is produced per cluster.
 
-A Deployment changes. The Kubernetes API server sends an UPDATE event through the watch stream. The informer calls `UpdateFunc` with the old and new Deployment objects.
+3. **Hash seeding** — If persistence is enabled, each `ClusterWatcher` loads its last-known `ClusterRolloutState` CRD before starting. This seeds the `templateCache` with hashes from the previous run, enabling gap detection.
 
-Not every update is a rollout. The API server sends events for status changes (replica counts updating), scale operations, label/annotation edits, and actual template changes. They all arrive through the same `UpdateFunc`.
+4. **LIST (baseline)** — Each `ClusterWatcher` starts a `SharedInformerFactory` which issues a full LIST of all `apps/v1/Deployments`. The `onAdd` handler computes `SHA256(json(deployment.Spec.Template))` and stores it in the in-memory `templateCache`. No rollout events are emitted at this stage. If a persisted hash exists for a deployment and the LIST hash differs, a gap-detection rollout event is fired immediately.
 
-### 5. Hash Comparison
+5. **WATCH (live)** — After cache sync, the informer transitions to a long-lived WATCH stream. Every `UpdateFunc` call computes a new hash and compares it to the cached value. If the hash changed, a `RolloutEvent` is constructed with cluster, namespace, deployment name, old/new images, and old/new hashes. The event is optionally enriched with `App` and `SlackChannel` fields via the `EventEnricher` callback (resolved from env configs + Slack routing).
 
-The monitor computes `SHA256(json(newDeployment.Spec.Template))` and looks up the cached hash for this Deployment:
+6. **Debounce** — The `RolloutEvent` is submitted to the `Debouncer` under the key `clusterID/namespace/deployment`. Each new event for the same key resets a 30-second timer and replaces the pending event. Only the final event is emitted when the timer fires. The send to `eventCh` is non-blocking — a full queue drops the event with a warning rather than blocking the informer goroutine.
 
-```
-newHash = SHA256(newDeployment.Spec.Template)  →  "ddd444..."
-oldHash = templateCache["minikube/default/checkout"]  →  "aaa111..."
-```
+7. **Dispatch** — A pool of worker goroutines (default 3) reads from `eventCh` and calls `Dispatch()` on each registered `Target` in sequence. Targets receive every event:
+   - `LogTarget` — always on; writes structured JSON to stdout
+   - `AuditTarget` — present when persistence is enabled; creates a `RolloutRecord` CRD
+   - `SlackTarget` — POST to an incoming webhook
+   - `SlackBotTarget` — POST to a per-app Slack channel resolved from `SlackChannel` on the event
+   - `InvestigationTarget` — delegates to the `Orchestrator` for async investigation
 
-**If `newHash == oldHash`**: Not a rollout. The change was a status update, scale event, or metadata edit — `spec.template` is unchanged. The event is silently dropped. No further processing.
+8. **Investigation** — `InvestigationTarget.Dispatch()` calls `Orchestrator.Investigate()` and returns immediately. The orchestrator runs the investigation asynchronously using bounded concurrency (`INVESTIGATION_MAX_CONCURRENT`, default 10). A new rollout for the same deployment cancels any in-flight investigation (supersede semantics). Two investigator backends are supported:
+   - `RunbookInvestigator` — runs `RolloutAnalyzer` directly against the cluster API; two-phase: (1) poll for convergence with soak period, (2) gather diagnostics on failure
+   - `HolmesInvestigator` — POSTs to Holmes API (`/api/chat`) with a natural-language query
+   Results are posted to Slack via `SlackReporter`. If `TRACE=true`, results are stored in `StatusCache` and exposed via a status HTTP API on port 8081.
 
-**If `newHash != oldHash`**: Rollout detected. The `spec.template` changed — this means a new image, environment variable, volume mount, or other pod-level configuration change. The monitor builds a `RolloutEvent` with the cluster, namespace, deployment name, old/new images, and old/new hashes.
+9. **Persistence** — Hash updates are buffered in `HashStore` and flushed to `ClusterRolloutState` CRDs every 5 seconds. On shutdown, a final flush runs to minimize data loss. The `AuditRecorder` creates and updates `RolloutRecord` CRDs with dispatch phase (`Detected` → `Dispatched` or `Failed`).
 
-The cache is updated: `templateCache["minikube/default/checkout"] = "ddd444..."`.
+10. **Reconcile loop** — The `Manager` runs a background reconcile loop (ticks every 10 seconds) with three phases per tick:
+    - **Directory rescan** (every `RESCAN_INTERVAL_SECONDS`) — re-reads `KUBECONFIG_DIR`; starts watchers for new files, recycles watchers for changed files, stops watchers for removed files
+    - **Health check** — inspects running watchers for consecutive errors or permanent auth failures; unhealthy watchers are stopped and queued for retry
+    - **Retry** — processes the pending-retry queue with exponential backoff (10s → 5m cap)
 
-### 6. Debounce
+11. **Shutdown** — On SIGTERM/SIGINT, the monitor stops the status API, stops the manager (which stops all watchers and the debouncer), drains the event channel, waits for dispatcher workers, stops the investigation orchestrator, and cancels all contexts.
 
-The `RolloutEvent` is submitted to the debouncer under the key `minikube/default/checkout`. The debouncer starts a 30-second timer for this key.
+## Key Abstractions
 
-If another template change arrives for the same Deployment within 30 seconds (e.g., a rapid `kubectl apply` correction), the timer resets and the pending event is replaced with the latest one. Only the final event is emitted when the timer expires.
-
-### 7. Dispatch
-
-When the debounce timer fires, the event is placed on a buffered channel. A dispatcher worker goroutine picks it up and routes it to all configured targets:
-
-- **Log**: Writes a structured JSON line to stdout with cluster, namespace, deployment, image diff, and hash diff
-- **Holmes**: POSTs to `/api/chat` with a natural-language query: *"Deployment checkout in namespace default on cluster minikube rolled out: checkout:v1.9 → checkout:v2.0. Analyse the rollout health."* — Holmes investigates autonomously
-- **Slack**: POSTs a formatted message to the webhook: *"Rollout detected: checkout (default) on minikube — checkout:v1.9 → checkout:v2.0"*
-
-### 8. Record and Persist
-
-If persistence is enabled:
-
-- A `RolloutRecord` CRD is created with phase `Detected`, then updated to `Dispatched` (or `Failed`) after all targets have been called
-- The updated template hash is buffered for the next `ClusterRolloutState` flush (every 5 seconds)
-
-The `RolloutRecord` is the audit trail. The `ClusterRolloutState` is the baseline for surviving the next restart.
-
-### 9. Steady State
-
-The monitor continues watching. Steps 4–8 repeat for every Deployment change. The informer maintains the watch connection, the debouncer coalesces rapid changes, and the dispatcher routes events to targets.
-
-On shutdown (SIGTERM/SIGINT), the monitor cancels all informer contexts, stops the debouncer (dropping pending events), and if persistence is enabled, flushes any buffered hash updates to the `ClusterRolloutState` CRD.
-
-### 10. Credential Rotation and Cluster Discovery
-
-When running with `KUBECONFIG_DIR` (e.g., volume-mounted Rancher kubeconfigs), credentials can rotate and new clusters can appear at any time. The monitor runs a periodic reconcile loop to handle this without requiring a restart.
-
-**How it works:**
-
-The Manager re-reads the kubeconfig directory on a configurable interval (`RESCAN_INTERVAL_SECONDS`, default 600, `0` = disabled). Each file is hashed with SHA256 to detect changes efficiently — if a file's content hasn't changed, its watcher is left alone.
-
-On each rescan, three things can happen:
-
-- **New file appeared** — A new kubeconfig file was added to the directory (new cluster onboarded). The manager starts a fresh ClusterWatcher for it. The informer issues an initial LIST to seed the template cache, then transitions to WATCH. No false rollout events are emitted — the new watcher treats the LIST as baseline, same as initial startup.
-
-- **File content changed** — A kubeconfig was updated (token rotation, server URL change, certificate renewal). The manager stops the old ClusterWatcher, creates a new one with the updated `*rest.Config`, and starts it. The new watcher re-LISTs deployments to rebuild its template cache. Because it starts fresh, no stale credentials are used.
-
-- **File removed** — A cluster was decommissioned. The manager stops the watcher and removes it from the map. Any pending debounced events for that cluster are dropped when the debouncer is next cleaned up.
-
-**What doesn't happen:**
-
-If the directory is temporarily unreadable (e.g., during a volume remount), the reconcile logs an error and skips the cycle. Existing watchers continue running undisturbed — the monitor never tears down working watchers because of a transient read failure.
-
-**Configuration:**
-
-| Variable | Default | Description |
+| Abstraction | File | Description |
 |---|---|---|
-| `RESCAN_INTERVAL_SECONDS` | `600` | How often to re-read `KUBECONFIG_DIR` for changes. `0` disables rescanning. |
+| `Manager` | `internal/watcher/manager.go` | Owns all per-cluster watchers; drives reconcile loop and retry queue |
+| `ClusterWatcher` | `internal/watcher/informer.go` | Wraps a `SharedInformerFactory`; maintains `templateCache`; emits rollout events |
+| `Debouncer` | `internal/watcher/debouncer.go` | Per-key timer-based coalescing; non-blocking send to `eventCh` |
+| `NamespaceFilter` | `internal/watcher/namespace_filter.go` | Thread-safe allow/deny filter; runtime-updatable via `ConfigWatcher` |
+| `ConfigWatcher` | `internal/watcher/config_watcher.go` | Watches `MonitorConfig` CRD to hot-reload namespace filtering |
+| `Dispatcher` | `internal/dispatch/dispatcher.go` | Worker pool fanning events to registered `Target` implementations |
+| `Target` | `internal/dispatch/dispatcher.go` | Interface (`Dispatch`, `Name`) for any notification destination |
+| `RecordWatcher` | `internal/dispatch/record_watcher.go` | Split-mode: watches `RolloutRecord` CRDs; dispatches with optimistic locking |
+| `Orchestrator` | `internal/investigation/orchestrator.go` | Manages concurrent investigations with supersede semantics and bounded concurrency |
+| `Investigator` | `internal/investigation/investigator.go` | Interface (`Investigate`) for runbook and Holmes backends |
+| `RolloutAnalyzer` | `internal/diagnostic/analyzer.go` | Two-phase runbook: convergence polling + soak period, then diagnostics on failure |
+| `HashStore` | `internal/persistence/hash_store.go` | Batched writes of template hashes to `ClusterRolloutState` CRDs |
+| `AuditRecorder` | `internal/persistence/audit_recorder.go` | Creates and updates `RolloutRecord` CRDs for each dispatched event |
+| `RolloutEvent` | `internal/models/event.go` | Shared event struct; carries cluster, namespace, deployment, image diff, hashes, app, Slack channel |
 
-This feature only activates when `KUBECONFIG_DIR` is set. Single-kubeconfig mode (`KUBECONFIG`) does not rescan.
+## Rollout Detection
 
----
+A rollout is a change to `spec.template`, not any update. `ClusterWatcher` maintains a `templateCache` keyed by `clusterID/namespace/deploymentName` mapping to `SHA256(json(deployment.Spec.Template))`:
 
-## Core Components
+- `onAdd` seeds the cache from the initial LIST — no event emitted; this is baseline
+- `onUpdate` emits only when the hash changed **and** a prior hash existed, filtering status updates, scale changes, label/annotation edits
+- `onDelete` evicts the cache key (unwrapping `cache.DeletedFinalStateUnknown` tombstones) to bound cache growth
 
-```
-┌─────────────────────────────────────────────────────┐
-│  ClusterWatchManager                                │
-│  ┌───────────────────────────────────────────────┐  │
-│  │ ClusterWatcher (one per cluster)              │  │
-│  │  SharedInformerFactory → LIST+WATCH           │  │
-│  │  templateCache: map[key]sha256                │  │
-│  │  UpdateFunc: hash comparison → RolloutEvent   │  │
-│  └──────────────────┬────────────────────────────┘  │
-│                     │                               │
-│              Debouncer (30s per deployment)          │
-│                     │                               │
-│              chan RolloutEvent (buffered)            │
-│                     │                               │
-│  ┌──────────────────▼────────────────────────────┐  │
-│  │ Dispatcher (N worker goroutines)              │  │
-│  │  ├─ LogTarget (always on)                     │  │
-│  │  ├─ HolmesTarget (POST /api/chat)            │  │
-│  │  └─ SlackTarget (POST webhook)               │  │
-│  └───────────────────────────────────────────────┘  │
-│                                                     │
-│  Persistence Store (optional)                       │
-│  ├─ ClusterRolloutState CRD (hash persistence)      │
-│  └─ RolloutRecord CRD (event history)               │
-└─────────────────────────────────────────────────────┘
-```
+Informers apply `stripUnneededFields` via `WithTransform` to drop `managedFields` and `last-applied-configuration`. This reduces per-object memory by 26–50% at multi-cluster scale (deployed limit is 128 MiB).
 
-### Watch Layer
+## Split Mode
 
-Each cluster gets its own `ClusterWatcher` running a `client-go` `SharedInformerFactory`. The informer handles the full LIST+WATCH lifecycle: initial list to seed the cache, long-lived watch for updates, automatic reconnect with backoff on failures.
+When `DISPATCHER_SPLIT=true` (requires `PERSISTENCE_ENABLED=true`), the monitor binary writes only `RolloutRecord` CRDs — it does not dispatch notifications. A separate `dispatcher` binary (`cmd/dispatcher/`) watches the same CRDs via `RecordWatcher` and handles all notification targets.
 
-**Rollout detection** works by computing `SHA256(json(deployment.Spec.Template))` on every update event. If the hash changed from the cached value, it's a rollout. This filters out noise — status updates, scale changes, label edits, and annotation changes all leave the template hash unchanged.
+`RecordWatcher` uses optimistic locking to claim records: it sets `status.phase` from `Detected` to `Processing` via a compare-and-swap update. A 409 Conflict response means another dispatcher replica already claimed it. Records stuck in `Processing` for more than 10 minutes are reset to `Detected` by a periodic recovery scan. A `TTLCleaner` expires records older than `ROLLOUT_RECORD_TTL_DAYS` (default 7).
 
-On startup, the initial LIST seeds the cache with current hashes (baseline). No rollout events are emitted for the baseline — only subsequent changes trigger events.
+## Persistence
 
-**Staggered startup** spaces cluster watchers 1 second apart to avoid hammering the API server with simultaneous LIST calls across all clusters.
+Without persistence, all `templateCache` hashes live in memory. On restart, the monitor re-seeds from the current cluster state via the informer LIST but has no prior hashes to compare against — rollouts that occurred during downtime are silently missed.
 
-### Resource Profile: SharedInformerFactory Watch per Cluster
+With `PERSISTENCE_ENABLED=true`, two CRDs address this:
 
-Each `ClusterWatcher` uses a `SharedInformerFactory` which maintains a long-lived HTTP/2 Watch stream to the API server. Steady-state cost per cluster:
+**`ClusterRolloutState`** — one per watched cluster; stores the full `namespace/deployment → SHA256` map. Loaded before the informer starts, so the initial LIST can detect hash mismatches (gap detection). Updated every 5 seconds via batched writes.
 
-- **Goroutines (~2):** one Reflector goroutine (drives the List+Watch HTTP loop) and one controller/processor goroutine (drains the internal delta FIFO and calls `onAdd`/`onUpdate`/`onDelete`). Plus one transient goroutine per pending debouncer timer.
-- **TCP connections (1):** one persistent HTTP/2 watch stream per cluster. The informer watches all Deployments cluster-wide through this single connection — it is not per-namespace or per-deployment.
-- **Memory:** dominated by the informer's in-memory store — one full Deployment object per watched deployment, after `stripUnneededFields` strips `managedFields` and `last-applied-configuration`. Roughly 2–5 KB per deployment post-stripping; 1000 deployments ≈ 2–5 MB. The `templateCache` map (64-char SHA256 string per key) is negligible. Resync is disabled (`0`), so no periodic full re-LIST memory spikes.
-- **CPU:** essentially idle. The Watch connection blocks on the API server. CPU use comes only from deserializing events and computing `templateHash` (JSON marshal → SHA256), both trivially cheap.
+**`RolloutRecord`** — one per detected rollout. Phase lifecycle: `Detected` → `Processing` (split mode only) → `Dispatched` or `Failed`. Carries labels `deploy-monitor.io/cluster`, `deploy-monitor.io/namespace`, and `deploy-monitor.io/deployment` for label-selector queries.
 
-#### Scaling estimates
+**`MonitorConfig`** — cluster-scoped CRD named `default`; overrides `NAMESPACE_ALLOWLIST` and `NAMESPACE_DENYLIST` at runtime without restart. Requires `PERSISTENCE_ENABLED=true`.
 
-| Clusters | Deployments (total) | Goroutines | TCP connections | Estimated memory (informer stores) |
+## Diagnostic Runbook
+
+The `RolloutAnalyzer` implements a two-phase runbook invoked by `RunbookInvestigator`:
+
+**Phase 1 — Monitor rollout** (up to `AbsoluteTimeout`, default 10m):
+1. Poll the Deployment every `PollInterval` (default 10s)
+2. Gate on `observedGeneration == generation` before evaluating replica state
+3. Check failure conditions: `ProgressDeadlineExceeded` condition, containers stuck in `Waiting` state beyond `ConfigErrorWindow` (default 90s), restart count exceeding `RestartThreshold` (default 3) within `RestartWindow` (default 5m)
+4. Detect inactivity stall: no forward progress in replica counts for `InactivityTimeout` (default 5m)
+5. On convergence (`updatedReplicas == desired && availableReplicas == desired && unavailableReplicas == 0`), enter a `SoakPeriod` (default 60s) and re-check for regressions
+
+**Phase 2 — Gather diagnostics** (only on non-SUCCESS results):
+- Collect Warning events from the namespace related to the deployment
+- Inspect pod and init container statuses from the new ReplicaSet
+- Fetch and filter current and previous container logs for error patterns (`error`, `fatal`, `panic`, `traceback`, `exception`), with deduplication
+
+Results: `Success`, `Failed`, `Stalled`, `Unstable`, `Paused`, `Deleted`, `Inconclusive`. Reports are posted to Slack via `SlackReporter`.
+
+## Resource Profile
+
+Each `ClusterWatcher` holds one `SharedInformerFactory` maintaining a long-lived HTTP/2 watch stream per cluster.
+
+**Steady-state per cluster:**
+- ~2 goroutines (Reflector + processor); plus one transient goroutine per pending debounce timer
+- 1 persistent TCP/HTTP/2 connection to the API server
+- Memory: ~2–5 KB per deployment object post-stripping; 1,000 deployments ≈ 2–5 MB
+- CPU: essentially idle between events; SHA256 computation per event is negligible
+
+**Scaling estimates:**
+
+| Clusters | Deployments (total) | Goroutines | TCP connections | Estimated memory |
 |---|---|---|---|---|
 | 10 | 2,000 | ~20 | 10 | ~10 MB |
 | 50 | 10,000 | ~100 | 50 | ~50 MB |
 | 100 | 20,000 | ~200 | 100 | ~100 MB |
 
-Memory is the binding constraint. The deployed limit of 128Mi is workable up to ~50 clusters with typical deployment counts. Beyond that, raise the memory limit or shard watchers across replicas.
+Memory is the binding constraint. The deployed limit of 128 MiB supports up to ~50 clusters with typical deployment counts.
 
-#### How field stripping affects memory
+## Error Handling and Retry
 
-`stripUnneededFields` removes `managedFields` and `last-applied-configuration` via the informer's `WithTransform` option. Published benchmarks show this reduces per-object memory by 26–50%:
+**client-go Reflector (automatic):**
+- Watch disconnect — exponential backoff, reconnects from last `resourceVersion`
+- 410 Gone (etcd compaction) — full re-LIST to obtain a fresh `resourceVersion`; `onAdd` re-seeds the cache; events during the gap are missed within a session
+- 401/403 — logged as permanent error; recovery happens when creds rotate and the reconcile loop recycles the watcher
 
-- Red Hat documented an operator going from 36 MiB to 14 MiB under load after adding `SetTransform` to strip unused fields ([source](https://developers.redhat.com/articles/2026/06/01/protect-your-kubernetes-operator-oomkill)).
-- Kubernetes upstream benchmarks on 50,000 pods showed per-object memory dropping from 24.15 KB to 8.44 KB (65% reduction) when combining field stripping with string interning ([source](https://github.com/kubernetes/kubernetes/issues/137109)).
-- KubeVela explicitly drops `managedFields` and `last-applied-configuration` from their informer cache, citing these as the largest per-object overhead contributors ([source](https://www.cncf.io/blog/2023/04/12/stability-and-scalability-assessment-of-kubevela/)).
+**Manager / application layer:**
+- Initial cache sync failure — cluster skipped, queued for retry
+- Watcher unhealthy (consecutive errors, permanent auth failures) — stopped and queued for retry with exponential backoff (10s → 5m cap)
+- Kubeconfig removed — watcher stopped on next directory rescan
+- Kubeconfig credentials rotated — watcher recycled with fresh clientset on next rescan
+- Event channel full — Debouncer drops the event with a warning log; informer goroutine is never blocked
 
-#### Comparable systems at scale
+**Known gap:** On a 410-triggered re-LIST, intermediate rollouts missed between the old `resourceVersion` and the new LIST are silently lost. CRD persistence mitigates this across restarts via hash mismatch detection, but not within a running session.
 
-These numbers come from published benchmarks, not estimates:
-
-- **ArgoCD** (CNOE benchmark): 500 clusters / 50k apps on 3× m5.2xlarge nodes. At 10k apps the controller ran ~2,100–2,800 goroutines. Production rule of thumb: ~1 controller shard per 15–20 clusters ([source](https://cnoe.io/blog/argo-cd-application-scalability)).
-- **Karmada** (CNCF test): 100 clusters × 5,000 nodes × 20,000 pods. Per-cluster agent memory: 266 MiB for a 5,000-node cluster. CPU: 40 millicores ([source](https://www.cncf.io/blog/2022/11/29/support-for-100-large-scale-clusters/)).
-- **Rancher Fleet**: documented hard limit of 100,000 BundleDeployments (e.g., 150 bundles × 2,000 clusters) before a single controller becomes untenable ([source](https://fleet.rancher.io/tutorials/best-practices)).
-- **KubeVela**: memory scales linearly — 1 GB at 3k apps, 4 GB at 12k apps, 160 GB (5 replicas × 32 GB) at 400k apps ([source](https://www.cncf.io/blog/2023/04/12/stability-and-scalability-assessment-of-kubevela/)).
-
-#### Initial LIST cost
-
-The most expensive moment is startup. The informer issues a full LIST of all Deployments per cluster. With staggered startup (1s between clusters), 100 clusters takes ~100 seconds to reach full watch coverage. The LIST response loads all Deployment objects into memory at once. For clusters with thousands of Deployments and large annotation payloads, this can cause a transient memory spike.
-
-Kubernetes 1.27+ introduced WatchList (KEP-3157) which streams the initial sync instead of buffering it. In benchmarks, this reduced API server memory from 70–80 GB to 3 GB for concurrent 10× 1 GB LIST operations. Client-side benefits depend on the API server version ([source](https://kubernetes.io/blog/2025/05/09/kubernetes-v1-33-streaming-list-responses/)).
-
-### Error Handling and Retry
-
-**client-go Reflector (automatic, inside the informer):**
-
-- **Watch disconnect** (TCP reset, timeout): Reflector backs off exponentially (capped ~5 min), re-opens Watch from the last known `resourceVersion`. No data loss.
-- **410 Gone** (etcd compacted the requested `resourceVersion`): Reflector does a full re-LIST to obtain a fresh `resourceVersion`, then resumes Watch. `onAdd` re-seeds the `templateCache` with current state. Events during the gap are silently missed (see known gap below).
-- **401/403** (expired creds, RBAC revoked): Reflector still retries forever. The custom `SetWatchErrorHandler` (`informer.go:91`) logs these as permanent errors. Recovery happens when creds rotate on disk and `reconcileLoop` recycles the watcher with a fresh clientset.
-- **API server unreachable**: same exponential backoff; reconnects when the server returns.
-
-**Application layer (Manager / ClusterWatcher):**
-
-- **Initial cache sync failure**: `WaitForCacheSync` returns false → `Start()` returns an error. Manager logs it, skips that cluster, continues starting others.
-- **Kubeconfig removed**: `reconcileLoop` detects missing file hash → calls `Stop()`, removes watcher.
-- **Kubeconfig credentials rotated**: `reconcileLoop` detects changed file hash → stops old watcher, starts new one with fresh clientset. Re-seeds hashes from CRD if persistence is enabled.
-- **Event channel full**: Debouncer does a non-blocking send; a full queue drops the event with a warning log rather than blocking the informer goroutine.
-
-**Known gap:** On a 410-triggered re-LIST, intermediate rollout events that occurred between the old `resourceVersion` and the new LIST are missed. The `SeedHashes` + CRD persistence mechanism partially mitigates this across restarts (hash mismatch from persisted state triggers a rollout event), but within a running session a re-LIST resets the baseline silently.
-
-### Debouncer
-
-Rapid template changes to the same deployment (e.g., multiple `kubectl apply` in quick succession) are coalesced. The debouncer holds events for 30 seconds per deployment key. Each new event for the same key resets the timer and replaces the pending event. Only the latest event is emitted when the timer expires.
-
-### Dispatcher
-
-A pool of worker goroutines (default 3) consumes events from a buffered channel and routes them to configured targets. All targets receive every event. Targets are:
-
-- **Log** — always on, writes structured JSON to stdout
-- **Holmes** — POST to Holmes API with a natural-language query describing the rollout, so Holmes can investigate autonomously
-- **Slack** — POST to a webhook with a formatted notification
-
-### Event Payload Size
-
-A `RolloutEvent` is a lightweight struct — all string fields, one string-slice pair, and a timestamp:
-
-| Field | Typical size |
-|---|---|
-| `ClusterID` | 20–40 bytes |
-| `ClusterName` | 20–40 bytes |
-| `Namespace` | 10–30 bytes |
-| `DeploymentName` | 15–50 bytes |
-| `OldTemplateHash` / `NewTemplateHash` | 64 bytes each (SHA256 hex) |
-| `OldImages` / `NewImages` | 60–120 bytes each (1–2 container image refs) |
-| `Timestamp` | 24 bytes (RFC3339) |
-
-**In-memory size: ~350–550 bytes per event.** When serialized to JSON for Slack/Holmes dispatch or `RolloutRecord` CRDs, field name overhead brings it to roughly **0.5–0.8 KB**. Even with long registry paths and multiple containers, a single event is unlikely to exceed 1.5 KB.
-
-At the default queue depth of 100, a completely full event channel holds ~50–80 KB — negligible relative to the informer store memory.
-
-### Namespace Filtering
-
-Namespaces are filtered at the watcher level before any processing. Two modes:
-
-- **Allowlist** — only watch listed namespaces (takes precedence)
-- **Denylist** — watch everything except listed namespaces (default: `kube-system`, `kube-public`, `kube-node-lease`)
-
-## Persistence
-
-### Why It's Needed
-
-Rollout detection works by comparing two `spec.template` hashes: the previously cached hash and the current one from the watch event. This is fundamentally a diff between two points in time — it requires a "before" state to compare against.
-
-Without persistence, all hashes live in memory. When the monitor restarts — whether from a deploy, OOM kill, node drain, or crash — the "before" state is lost. The monitor re-seeds from the current state of each cluster via the informer's initial LIST, but it only has one point in time (now). There is no previous hash to compare against, so the comparison cannot happen. Any Deployment that changed its `spec.template` while the monitor was down is indistinguishable from a Deployment that was always in its current state.
-
-Concrete example:
-
-1. Monitor is running, has the Deployment `default/checkout` cached with template hash `aaa111` (image `checkout:v1.9`)
-2. Monitor restarts
-3. During downtime, someone runs `kubectl set image deployment/checkout checkout=checkout:v2.0` — the Deployment's `spec.template` changes, producing a new hash `bbb222`
-4. Monitor comes back, initial LIST returns the Deployment with hash `bbb222` — this is stored as the baseline
-5. The `v1.9 → v2.0` rollout is never detected because the monitor has no record of the previous hash `aaa111` to compare against
-
-Note: scaling events, status updates, and label changes are already filtered out by design — the hash is `SHA256(spec.template)`, and fields like `spec.replicas` or `status` are outside the template. Persistence is specifically about preserving the "before" state across restarts so the comparison mechanism continues to work.
-
-Persistence solves two problems:
-
-1. **Gap detection** — On restart, the monitor loads the last-known hashes from before the shutdown. When the informer's initial LIST arrives with current state, any hash mismatches are real rollouts that happened while the monitor was down. In the example above, the monitor would load the persisted `v1.9` hash, compare it to the current `v2.0` hash from LIST, and fire the rollout event.
-
-2. **Audit trail** — Every detected rollout is recorded as a Kubernetes custom resource. This gives operators a queryable history of what rolled out, when, where, and whether dispatch succeeded or failed.
-
-### How It Works
-
-Persistence uses two Kubernetes CRDs stored on the same cluster the monitor runs on.
-
-**`ClusterRolloutState`** — one per watched cluster. Stores the full map of `namespace/deployment → SHA256 hash`. Updated via batched writes every 5 seconds to avoid excessive API calls. On startup, the monitor reads these before starting the informer, seeding the template cache with persisted hashes instead of starting blank.
+## Directory Structure
 
 ```
-kubectl get clusterrolloutstates -n rollout-monitor
-NAME       CLUSTER    DEPLOYMENTS   LAST SYNC
-minikube   minikube   9             2026-07-16T05:00:44Z
+cmd/
+  monitor/main.go          Monitor binary — config, watcher, dispatcher, persistence wiring
+  dispatcher/main.go       Dispatcher binary — split mode CRD-driven dispatch
+
+api/v1alpha1/
+  types.go                 CRD types: ClusterRolloutState, RolloutRecord, phase constants
+  monitor_config.go        MonitorConfig CRD type (runtime namespace filtering)
+
+internal/
+  config/
+    config.go              YAML config loading, env var overrides, defaults, validation
+    kubeconfig.go          Cluster credential loading (directory or single file)
+    env_config.go          Per-app env configs, NamespaceLookup, SlackRouting
+
+  models/
+    event.go               RolloutEvent struct
+
+  watcher/
+    manager.go             ClusterWatcher lifecycle; reconcile loop; rescan; retry queue
+    informer.go            SharedInformerFactory setup, hash comparison, event emission
+    debouncer.go           Per-key debounce with configurable window; non-blocking send
+    namespace_filter.go    Thread-safe allow/deny namespace filter
+    config_watcher.go      Watches MonitorConfig CRD to hot-reload namespace filter
+
+  dispatch/
+    dispatcher.go          Worker pool; Target interface; DispatchEvent
+    log.go                 LogTarget: structured JSON stdout
+    slack.go               SlackTarget: incoming webhook
+    slack_bot.go           SlackBotTarget: per-app channel via bot token
+    audit_target.go        AuditTarget: creates RolloutRecord CRD on dispatch
+    record_watcher.go      RecordWatcher: split-mode CRD-driven dispatch with optimistic lock
+    holmes.go              HolmesTarget: POST to Holmes /api/chat
+    ttl_cleaner.go         Expires RolloutRecord CRDs older than configured TTL
+
+  investigation/
+    investigator.go        Investigator interface (Runbook and Holmes implementations)
+    orchestrator.go        Concurrent investigation with supersede semantics; bounded semaphore
+    runbook.go             RunbookInvestigator: delegates to RolloutAnalyzer
+    slack_reporter.go      SlackReporter: posts DiagnosticReport to Slack
+    status_cache.go        In-memory last-1 cache of investigation results per deployment
+    status_api.go          HTTP handler for /status endpoint (TRACE mode)
+    target.go              InvestigationTarget: dispatch.Target wrapper for Orchestrator
+
+  diagnostic/
+    analyzer.go            RolloutAnalyzer: two-phase runbook (convergence + diagnostics)
+    registry.go            ClusterRegistry: provides kubernetes.Interface per cluster ID
+    report.go              DiagnosticReport, Result types, PodStatus, LogSnippet, K8sEvent
+
+  persistence/
+    hash_store.go          Batched template hash writes to ClusterRolloutState CRDs
+    audit_recorder.go      Creates and updates RolloutRecord CRDs
+
+deploy/
+  crds.yaml                CRD manifests (ClusterRolloutState, RolloutRecord, MonitorConfig)
+  deployment.yaml          Kubernetes Deployment with RBAC (Namespace, SA, ClusterRole, Deployment)
+  monitor/                 Monitor-specific deploy manifests
+  dispatcher/              Dispatcher-specific deploy manifests
 ```
-
-**`RolloutRecord`** — one per detected rollout. Created when the dispatcher picks up an event, then updated with dispatch status after all targets have been called. Tracks the full lifecycle:
-
-- `Detected` — rollout seen, record created
-- `Dispatched` — successfully sent to at least one target
-- `Failed` — all dispatch targets failed
-
-```
-kubectl get rolloutrecords -n rollout-monitor
-NAME                                       CLUSTER    NAMESPACE   DEPLOYMENT     PHASE        AGE
-minikube-default-test-rollout-1784178041   minikube   default     test-rollout   Dispatched   7s
-```
-
-Each record carries labels (`deploy-monitor.io/cluster`, `deploy-monitor.io/namespace`, `deploy-monitor.io/deployment`) for filtering with label selectors.
-
-**Batched writes with re-queue on failure** — Hash updates are buffered in memory and flushed to the `ClusterRolloutState` CRD every 5 seconds. If a write fails (API server unavailable, conflict), the updates are re-queued for the next flush cycle. A final flush runs on shutdown to minimize data loss.
-
-Persistence is opt-in via `PERSISTENCE_ENABLED=true`. When disabled, the monitor behaves exactly as before — in-memory hashes, no CRDs, no API writes.
 
 ## Configuration
 
-All configuration is via environment variables:
+Configuration is loaded from a YAML file (`/etc/rollout-monitor/config.yaml` or `CONFIG_FILE` env var), with env var overrides applied afterward for secrets and backward compatibility. If no config file exists, the monitor falls back to pure env var loading.
 
-| Variable | Default | Description |
+| Variable / YAML key | Default | Description |
 |---|---|---|
-| `KUBECONFIG_DIR` | — | Directory of kubeconfig files (multi-cluster mode) |
-| `KUBECONFIG` | `~/.kube/config` | Single kubeconfig file (local dev mode) |
-| `NAMESPACE_ALLOWLIST` | — | Comma-separated namespaces to watch (overrides denylist) |
-| `NAMESPACE_DENYLIST` | `kube-system,kube-public,kube-node-lease` | Comma-separated namespaces to exclude |
-| `DISPATCH_MODE` | `log` | `log`, `holmes`, `slack`, or `both` |
-| `HOLMES_API_URL` | — | Holmes API base URL (required if dispatch includes holmes) |
-| `SLACK_WEBHOOK_URL` | — | Slack incoming webhook URL (required if dispatch includes slack) |
-| `WORKER_COUNT` | `3` | Number of dispatcher worker goroutines |
-| `DEBOUNCE_SECONDS` | `30` | Debounce window per deployment |
-| `QUEUE_MAX_SIZE` | `100` | Buffered event channel capacity |
-| `RESCAN_INTERVAL_SECONDS` | `600` | How often to re-read `KUBECONFIG_DIR` for changes (`0` = disabled) |
-| `PERSISTENCE_ENABLED` | `false` | Enable CRD-based persistence |
-| `PERSISTENCE_NAMESPACE` | `rollout-monitor` | Namespace where CRDs are stored |
-| `TRACE` | `false` | Trace-level logging for investigation pipeline internals |
-
-## Project Layout
-
-```
-cmd/monitor/main.go              Entry point — config, watcher, dispatcher, persistence wiring
-api/v1alpha1/                    CRD type definitions (ClusterRolloutState, RolloutRecord)
-internal/
-  config/
-    config.go                    Environment variable loading and namespace filtering
-    kubeconfig.go                Cluster credential loading (single file or directory)
-  models/
-    event.go                     RolloutEvent struct
-  watcher/
-    manager.go                   Manages per-cluster watchers with staggered startup
-    informer.go                  SharedInformerFactory setup, hash comparison, event emission
-    debouncer.go                 Per-deployment-key debounce with configurable window
-  dispatch/
-    dispatcher.go                Worker pool routing events to targets
-    log.go                       Stdout structured logging target
-    holmes.go                    Holmes API HTTP client
-    slack.go                     Slack webhook HTTP client
-  persistence/
-    store.go                     CRD read/write with batched flush and re-queue
-deploy/
-  crds.yaml                      CRD definitions (ClusterRolloutState, RolloutRecord)
-  deployment.yaml                Kubernetes deployment manifest with RBAC
-```
+| `KUBECONFIG_DIR` / `kubeconfigDir` | — | **Required.** Directory of kubeconfig files; filename stem becomes cluster ID |
+| `DISPATCH_MODE` / `dispatchMode` | `log` | `log`, `holmes`, `slack`, or `both` |
+| `HOLMES_API_URL` / `holmesAPIURL` | — | Required for `holmes`/`both` dispatch mode |
+| `SLACK_WEBHOOK_URL` / `slackWebhookURL` | — | Required for `slack`/`both` dispatch mode and `runbook` investigation mode |
+| `SLACK_BOT_TOKEN` / `slackBotToken` | — | Enables per-app channel routing via Slack bot |
+| `NAMESPACE_ALLOWLIST` / `namespaceAllowlist` | — | Comma-separated; if set, denylist is ignored |
+| `NAMESPACE_DENYLIST` / `namespaceDenylist` | `kube-system,kube-public,kube-node-lease` | Applies only when allowlist is empty |
+| `INVESTIGATION_MODE` / `investigationMode` | `none` | `none`, `runbook`, or `holmes` |
+| `INVESTIGATION_MAX_CONCURRENT` / `investigationMaxConcurrent` | `10` | Max concurrent investigations |
+| `WORKER_COUNT` / `workerCount` | `3` | Dispatcher worker goroutines |
+| `DEBOUNCE_SECONDS` / `debounceSeconds` | `30` | Debounce window per deployment |
+| `QUEUE_MAX_SIZE` / `queueMaxSize` | `100` | Buffered event channel capacity |
+| `RESCAN_INTERVAL_SECONDS` / `rescanIntervalSeconds` | `600` | How often to re-read `KUBECONFIG_DIR`; `0` disables |
+| `WATCHER_START_TIMEOUT_SECONDS` / `watcherStartTimeoutSeconds` | `30` | Timeout for initial cache sync per cluster |
+| `PERSISTENCE_ENABLED` / `persistenceEnabled` | `false` | Enable CRD-based hash persistence and audit recording |
+| `PERSISTENCE_NAMESPACE` / `persistenceNamespace` | `rollout-monitor` | Namespace for CRDs |
+| `DISPATCHER_SPLIT` / `dispatcherSplit` | `false` | Write CRDs only; delegate dispatch to separate dispatcher binary |
+| `ENV_CONFIG_DIR` / `envConfigDir` | — | Directory of per-app env YAML configs for app-name resolution |
+| `SLACK_ROUTING_FILE` / `slackRoutingFile` | — | YAML file mapping app names to Slack channel IDs |
+| `STATUS_API_PORT` / `statusAPIPort` | `8081` | Port for investigation status HTTP API (TRACE mode only) |
+| `ROLLOUT_RECORD_TTL_DAYS` / `rolloutRecordTTLDays` | `7` | RolloutRecord expiry (dispatcher binary only) |
+| `DEBUG` / `debug` | `false` | Debug-level logging |
+| `TRACE` / `trace` | `false` | Trace-level logging; enables status API |

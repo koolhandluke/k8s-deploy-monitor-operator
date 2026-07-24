@@ -66,6 +66,10 @@ spec:
             - name: STATUS_API_PORT
               value: {{ .Values.logging.statusAPIPort | default 8081 | quote }}
             {{- end }}
+            {{- if .Values.kubeconfig.configMapName }}
+            - name: KUBECONFIG_DIR
+              value: "/etc/kubeconfig"
+            {{- end }}
             {{- if ne .Values.investigation.mode "none" }}
             - name: INVESTIGATION_MODE
               value: {{ .Values.investigation.mode | quote }}
@@ -78,5 +82,17 @@ spec:
               containerPort: {{ .Values.logging.statusAPIPort | default 8081 }}
               protocol: TCP
           {{- end }}
+          {{- if .Values.kubeconfig.configMapName }}
+          volumeMounts:
+            - name: kubeconfig
+              mountPath: /etc/kubeconfig
+              readOnly: true
+          {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
+      {{- if .Values.kubeconfig.configMapName }}
+      volumes:
+        - name: kubeconfig
+          configMap:
+            name: {{ .Values.kubeconfig.configMapName }}
+      {{- end }}

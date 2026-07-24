@@ -1,171 +1,172 @@
-# Kubernetes Deployment Monitor Operator
+<!-- generated-by: gsd-doc-writer -->
+# k8s-deploy-monitor-operator
 
-A Kubernetes Operator built in Go that monitors deployment rollouts, persists state via Custom Resource Definitions (CRDs), and dispatches notifications to Holmes and Slack.
-
-## Overview
-
-The k8s-deploy-monitor-operator provides automated monitoring and alerting for Kubernetes deployment rollouts. It leverages Kubernetes' native CRD (Custom Resource Definition) mechanism to persistently track deployment status and integrates with external notification systems for real-time alerts.
-
-## Features
-
-- **Deployment Rollout Monitoring**: Automatically tracks and monitors Kubernetes deployment rollout progress
-- **CRD Persistence**: Uses Custom Resource Definitions to store and manage deployment monitoring state
-- **Multi-Channel Notifications**: 
-  - Holmes integration for enterprise alerting
-  - Slack notifications for team visibility
-- **Native Kubernetes Integration**: Built as a Kubernetes Operator following standard patterns
-
-## Prerequisites
-
-- Kubernetes cluster (v1.16+)
-- kubectl configured to access your cluster
-- Go 1.16+ (for building from source)
+A Go service that watches Kubernetes Deployment rollouts across one or more clusters, detects template changes via SHA256 hashing, and dispatches notifications to Slack or Holmes AI.
 
 ## Installation
 
-### From Pre-built Images
+### Prerequisites
+
+- Go >= 1.25.6 (for building from source)
+- Docker (for container image)
+- Helm 3 (for cluster deployment)
+- A directory of kubeconfig files, one per cluster
+
+### Build from source
 
 ```bash
-# Apply the operator deployment to your cluster
-kubectl apply -f config/manager/manager.yaml
-```
-
-### From Source
-
-```bash
-# Clone the repository
 git clone https://github.com/koolhandluke/k8s-deploy-monitor-operator.git
 cd k8s-deploy-monitor-operator
-
-# Build the operator
-make build
-
-# Deploy to your cluster
-make deploy
+go build ./...
 ```
 
-## Usage
-
-### Creating a Deployment Monitor
-
-Create a monitor for your deployment by defining a custom resource:
-
-```yaml
-apiVersion: monitor.koolhandluke.dev/v1alpha1
-kind: DeploymentMonitor
-metadata:
-  name: my-deployment-monitor
-  namespace: default
-spec:
-  deployment:
-    name: my-app
-    namespace: default
-  notifications:
-    slack:
-      enabled: true
-      channel: "#deployments"
-    holmes:
-      enabled: true
-      endpoint: "https://holmes.example.com"
-  timeout: 600s
-```
-
-Apply the resource:
+### Build container image
 
 ```bash
-kubectl apply -f deployment-monitor.yaml
+docker build -t rollout-monitor:latest .
 ```
 
-## Architecture
+## Quick Start
 
-This operator follows the Kubebuilder pattern and includes:
+**Run locally** (watches clusters from kubeconfigs in `./kubeconfigs/`):
 
-- **Controllers**: Watch Deployment resources and manage monitoring state
-- **Custom Resources**: Define monitoring behavior and configuration
-- **Webhooks**: Validate and mutate incoming resources
-- **Integration Clients**: Holmes and Slack notification handlers
+```bash
+KUBECONFIG_DIR=./kubeconfigs go run ./cmd/monitor
+```
+
+**Deploy to a cluster** via Helm:
+
+```bash
+# Log-only mode (no external notifications)
+helm upgrade --install deploy-monitor ./chart/deploy-monitor/ \
+  --namespace rollout-monitor \
+  --set image.repository=rollout-monitor \
+  --set image.pullPolicy=Never
+```
+
+After the 30-second debounce window, rollout events appear in the monitor logs:
+
+```bash
+kubectl logs -n rollout-monitor -l app.kubernetes.io/name=deploy-monitor -f
+```
+
+## Usage Examples
+
+### Trigger a rollout and observe detection
+
+```bash
+# Create a test deployment
+kubectl create deployment test-rollout --image=nginx:1.25 -n default
+
+# Update the image — this triggers rollout detection
+kubectl set image deployment/test-rollout nginx=nginx:1.26 -n default
+
+# Events appear in monitor logs after the 30s debounce window
+kubectl logs -n rollout-monitor -l app.kubernetes.io/name=deploy-monitor -f
+```
+
+### Deploy with Slack notifications
+
+```bash
+helm upgrade --install deploy-monitor ./chart/deploy-monitor/ \
+  --namespace rollout-monitor \
+  --set image.repository=rollout-monitor \
+  --set image.pullPolicy=Never \
+  --set dispatch.mode=slack \
+  --set dispatch.slackWebhookUrl=https://hooks.slack.com/services/YOUR/WEBHOOK/URL
+```
+
+### Deploy with runbook investigation
+
+Runbook mode polls the Deployment every 10 seconds after a rollout is detected, diagnoses failures (CrashLoopBackOff, ImagePullBackOff, ProgressDeadlineExceeded), and posts a report to Slack — no external AI service required.
+
+```bash
+helm upgrade --install deploy-monitor ./chart/deploy-monitor/ \
+  --namespace rollout-monitor \
+  --set image.repository=rollout-monitor \
+  --set image.pullPolicy=Never \
+  --set investigation.mode=runbook \
+  --set dispatch.slackWebhookUrl=https://hooks.slack.com/services/YOUR/WEBHOOK/URL
+```
 
 ## Configuration
 
-### Slack Integration
+The monitor reads from a YAML config file (`/etc/rollout-monitor/config.yaml` by default, overridden by `CONFIG_FILE`) with environment variable overrides for secrets. If no config file exists, it falls back to pure environment variable loading.
 
-Set the following environment variables:
+| Variable | Default | Notes |
+|---|---|---|
+| `KUBECONFIG_DIR` | — | **Required.** Directory of `.yaml`/`.yml`/`.conf` kubeconfig files; filename stem becomes cluster ID |
+| `DISPATCH_MODE` | `log` | `log` \| `holmes` \| `slack` \| `both`; invalid values fail startup |
+| `HOLMES_API_URL` | — | Required for `holmes`/`both`; posts to `/api/chat` |
+| `SLACK_WEBHOOK_URL` | — | Required for `slack`/`both` |
+| `SLACK_BOT_TOKEN` | — | Optional; enables per-app channel routing via Slack bot |
+| `NAMESPACE_ALLOWLIST` | — | Comma-separated; if set, denylist is ignored |
+| `NAMESPACE_DENYLIST` | `kube-system,kube-public,kube-node-lease` | Applies only when allowlist is empty |
+| `WORKER_COUNT` | `3` | Dispatcher worker pool size |
+| `DEBOUNCE_SECONDS` | `30` | Per-deployment coalescing window |
+| `QUEUE_MAX_SIZE` | `100` | Event queue depth before dropping |
+| `RESCAN_INTERVAL_SECONDS` | `600` | How often to re-read `KUBECONFIG_DIR` for added/changed/removed clusters |
+| `WATCHER_START_TIMEOUT_SECONDS` | `30` | Timeout for initial cache sync per cluster |
+| `PERSISTENCE_ENABLED` | `false` | Enable CRD-based hash persistence and audit recording |
+| `PERSISTENCE_NAMESPACE` | `rollout-monitor` | Namespace for `ClusterRolloutState` and `RolloutRecord` CRDs |
+| `INVESTIGATION_MODE` | `none` | `none` \| `runbook` \| `holmes` — post-rollout investigation mode |
+| `DEBUG` | `false` | Enable debug-level logging |
+| `TRACE` | `false` | Enable trace-level logging and the status API on port 8081 |
 
-```bash
-SLACK_TOKEN=xoxb-your-token
-SLACK_CHANNEL=your-channel
+Namespace filtering can also be configured at runtime via a `MonitorConfig` CRD named `default` (requires `PERSISTENCE_ENABLED=true`). CRD values override env vars when present.
+
+## How It Works
+
+The monitor detects rollouts by hashing `spec.template` — only actual pod template changes (image, env, volumes) trigger events. Status updates, scale changes, and label/annotation edits are silently dropped.
+
+```
+kubeconfigs → Manager → ClusterWatcher (1 per cluster) → Debouncer → eventCh → Dispatcher → Targets
+                ↕                ↕
+          reconcileLoop    HashStore (CRD)
 ```
 
-### Holmes Integration
+- One `ClusterWatcher` per cluster runs a `SharedInformerFactory` on Deployments. The initial LIST seeds the template hash cache (baseline); subsequent WATCH events compare against it.
+- The `Debouncer` coalesces rapid changes per deployment — only the latest event within the 30-second window is dispatched.
+- The `Dispatcher` fans events to all configured targets via a worker pool.
+- Persistence (opt-in) stores template hashes in `ClusterRolloutState` CRDs and writes an audit `RolloutRecord` per dispatched event.
+- The `Manager` periodically rescans `KUBECONFIG_DIR` to detect new, changed, or removed clusters without a restart.
 
-Configure Holmes endpoint and credentials:
+See [docs/architecture.md](docs/architecture.md) for the full operational flow.
 
-```bash
-HOLMES_ENDPOINT=https://holmes.example.com
-HOLMES_API_KEY=your-api-key
-```
+## Deployment
 
-## Development
+### Helm (recommended)
 
-### Prerequisites for Development
+See [TESTING.md](TESTING.md) for the full Helm values reference and deployment examples including Holmes AI integration.
 
-- Go 1.16+
-- Kubebuilder v3+
-- Docker (for building container images)
-
-### Running Locally
+### Raw manifests
 
 ```bash
-# Generate API manifests and CRDs
-make manifests
+# Apply CRDs (required if persistence is enabled)
+kubectl apply -f deploy/crds.yaml
 
-# Run the operator locally
-make run
+# Apply RBAC and Deployment
+kubectl apply -f deploy/deployment.yaml
 ```
 
-### Testing
+The Deployment manifest creates a `rollout-monitor` namespace, ServiceAccount, ClusterRole (read-only on Deployments), and a single-replica Deployment with resource limits of `200m` CPU and `128Mi` memory.
+
+## Testing
 
 ```bash
-# Run unit tests
-make test
+# Unit tests (no cluster required — uses fake clientsets)
+go test ./...
 
-# Generate test coverage
-make test-coverage
+# With race detector
+go test ./... -race
+
+# E2E tests (requires minikube)
+./test/e2e.sh
 ```
 
-### Building Container Image
-
-```bash
-# Build and push container image
-make docker-build docker-push IMG=your-registry/k8s-deploy-monitor-operator:latest
-```
-
-## Contributing
-
-Contributions are welcome! Please follow these steps:
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/your-feature`)
-3. Commit your changes (`git commit -am 'Add your feature'`)
-4. Push to the branch (`git push origin feature/your-feature`)
-5. Open a Pull Request
+See [TESTING.md](TESTING.md) for local development setup, E2E test scenarios, and the investigation status API.
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
-
-## Support
-
-For issues, questions, or contributions, please open an issue on the [GitHub repository](https://github.com/koolhandluke/k8s-deploy-monitor-operator/issues).
-
-## Roadmap
-
-- [ ] Additional notification channels
-- [ ] Enhanced monitoring metrics and dashboards
-- [ ] Performance optimizations for large-scale deployments
-- [ ] Helm chart for simplified installation
-- [ ] Comprehensive API documentation
-
----
-
-**Built with ❤️ using Kubebuilder**
+<!-- VERIFY: license type and LICENSE file presence -->
+See the LICENSE file for details.

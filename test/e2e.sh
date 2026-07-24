@@ -57,9 +57,47 @@ check_prereqs() {
     fi
 }
 
+# ---------- kubeconfig ----------
+# Generate an in-cluster kubeconfig and store it in a ConfigMap so the monitor
+# can discover clusters via KUBECONFIG_DIR.
+create_kubeconfig_configmap() {
+    kubectl create namespace "$RELEASE_NS" 2>/dev/null || true
+
+    local sa_base="/var/run/secrets/kubernetes.io/serviceaccount"
+    cat <<KUBEEOF | kubectl apply -n "$RELEASE_NS" -f -
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kubeconfig
+data:
+  minikube.yaml: |
+    apiVersion: v1
+    kind: Config
+    clusters:
+    - cluster:
+        server: https://kubernetes.default.svc
+        certificate-authority: ${sa_base}/ca.crt
+      name: minikube
+    contexts:
+    - context:
+        cluster: minikube
+        user: in-cluster
+      name: minikube
+    current-context: minikube
+    users:
+    - name: in-cluster
+      user:
+        tokenFile: ${sa_base}/token
+KUBEEOF
+
+    echo "Kubeconfig ConfigMap created."
+}
+
 # ---------- monitor deployment ----------
 deploy_monitor() {
     echo "Deploying monitor with investigation.mode=runbook ..."
+
+    create_kubeconfig_configmap
 
     # Build local image and load into minikube
     eval "$(minikube docker-env)"
@@ -70,6 +108,7 @@ deploy_monitor() {
         --set image.repository=rollout-monitor \
         --set image.tag=e2e \
         --set image.pullPolicy=Never \
+        --set kubeconfig.configMapName=kubeconfig \
         --set investigation.mode=runbook \
         --set dispatch.mode=slack \
         --set dispatch.slackWebhookUrl=TEST \
@@ -80,7 +119,7 @@ deploy_monitor() {
         --wait --timeout 120s
 
     # Wait for monitor pod to be ready
-    kubectl rollout status deployment/"$RELEASE"-deploy-monitor \
+    kubectl rollout status deployment/"$RELEASE" \
         -n "$RELEASE_NS" --timeout=60s
 
     echo "Monitor deployed."
@@ -413,8 +452,9 @@ test_supersede() {
     mark_log_start
     # First image change — will start investigation
     kubectl set image deployment/"$name" -n "$NAMESPACE" "*=nginx:1.26"
-    # Small delay then supersede with second change
-    sleep 3
+    # Wait longer than debounce window (5s) so the first event fires and starts
+    # an investigation, then supersede it with a second change
+    sleep 10
     kubectl set image deployment/"$name" -n "$NAMESPACE" "*=nginx:1.27"
 
     # Check two things:

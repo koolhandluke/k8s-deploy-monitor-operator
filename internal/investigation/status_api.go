@@ -32,7 +32,7 @@ func toStatusJSON(s InvestigationStatus) statusJSON {
 func NewStatusHandler(cache *StatusCache) http.Handler {
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("/api/v1/investigations", func(w http.ResponseWriter, r *http.Request) {
+	handler := func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -48,7 +48,11 @@ func NewStatusHandler(cache *StatusCache) http.Handler {
 		}
 
 		handleList(cache, w)
-	})
+	}
+
+	// Register both with and without trailing slash so sub-paths match
+	mux.HandleFunc("/api/v1/investigations", handler)
+	mux.HandleFunc("/api/v1/investigations/", handler)
 
 	return mux
 }

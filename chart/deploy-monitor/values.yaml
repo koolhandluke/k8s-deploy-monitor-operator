@@ -3,6 +3,9 @@ image:
   tag: latest
   pullPolicy: IfNotPresent
 
+kubeconfig:
+  configMapName: ""  # name of ConfigMap containing kubeconfig files (one key per cluster)
+
 dispatch:
   mode: log  # log | holmes | slack | both
   holmesApiUrl: ""
