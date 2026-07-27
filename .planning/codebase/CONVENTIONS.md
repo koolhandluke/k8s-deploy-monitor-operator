@@ -1,209 +1,250 @@
 # Coding Conventions
 
-**Analysis Date:** 2026-07-23
+**Analysis Date:** 2026-07-26
 
 ## Naming Patterns
 
 **Files:**
-- Lowercase with underscores: `hash_store.go`, `namespace_filter.go`, `slack_bot.go`
-- Test files: `*_test.go` co-located with source (e.g., `internal/watcher/informer_test.go`)
-- Generated files: `zz_generated_deepcopy.go` (kubebuilder convention)
-- Testdata: embedded YAML fixtures in `internal/diagnostic/testdata/data.go` using `//go:embed`
+- Use `snake_case.go` for all Go source files (e.g., `hash_store.go`, `namespace_filter.go`, `slack_bot.go`)
+- Test files use `_test.go` suffix, co-located with source (e.g., `informer_test.go` alongside `informer.go`)
+- CRD type files use descriptive names: `types.go`, `monitor_config.go`, `app_watch_config.go`
+- Generated files use `zz_generated_` prefix: `zz_generated_deepcopy.go`
 
-**Packages:**
-- Short, single-word lowercase: `watcher`, `dispatch`, `config`, `models`, `persistence`, `diagnostic`, `investigation`, `trace`
-- Package comments on the primary file: `// Package watcher detects Kubernetes Deployment rollouts...`
-
-**Types:**
-- PascalCase structs: `ClusterWatcher`, `HashStore`, `RolloutEvent`, `NamespaceFilter`
-- Interfaces are named by behavior, not "I" prefix: `Target`, `HashObserver`, `Investigator`
-- Type aliases for enum-like constants: `type DispatchMode string`, `type RolloutPhase string`
-
-**Functions/Methods:**
-- camelCase unexported: `templateHash()`, `stripUnneededFields()`, `applyDefaults()`
-- PascalCase exported: `NewClusterWatcher()`, `LoadClusters()`, `BufferHash()`
-- Constructor pattern: `New<Type>(deps...) *Type` (e.g., `NewHashStore(c, namespace)`)
-- Boolean methods: `Allowed()`, `NamespaceAllowed()`
+**Functions:**
+- Use `camelCase` for unexported functions: `templateHash()`, `stripUnneededFields()`, `envInt()`
+- Use `PascalCase` for exported functions: `NewClusterWatcher()`, `LoadClusters()`, `NamespaceAllowed()`
+- Constructors follow `New<Type>` pattern: `NewDebouncer()`, `NewDispatcher()`, `NewHashStore()`
+- Factory-style constructors return pointer: `func NewSlackTarget(...) *SlackTarget`
 
 **Variables:**
-- camelCase locals: `eventCh`, `nsFilter`, `deployKey`
-- Composite keys use `/` separator: `clusterID + "/" + namespace + "/" + name`
+- Use `camelCase` for local variables and struct fields
+- Short names for loop variables and receivers: `w` for watcher, `d` for debouncer, `s` for store, `c` for client
+- Descriptive names for function parameters: `clusterID`, `webhookURL`, `workerCount`
+
+**Types:**
+- Use `PascalCase` for exported types: `ClusterWatcher`, `RolloutEvent`, `DispatchMode`
+- String-typed enums use `PascalCase` constants: `DispatchLog`, `DispatchSlack`, `InvestigationRunbook`
+- Interfaces are named by behavior, not `I`-prefix: `Target`, `HashObserver`, `Investigator`
 
 **Constants:**
-- PascalCase exported: `DispatchLog`, `PhaseDetected`, `DefaultConfigPath`
-- Grouped in `const()` blocks with doc comments per constant
+- Enum constants use type prefix: `DispatchLog`, `DispatchHolmes` (not `Log`, `Holmes`)
+- Phase constants use `Phase` prefix: `PhaseDetected`, `PhaseDispatched`, `PhaseFailed`
 
 ## Code Style
 
 **Formatting:**
-- Standard `gofmt` — no custom formatter configured
-- No `.editorconfig`, `.prettierrc`, or similar
+- Standard `gofmt` formatting (no custom formatter configured)
+- No `.editorconfig`, `.prettierrc`, or equivalent exists
+- No linter or CI configuration in the repo
 
 **Linting:**
-- No linter configured (noted in CLAUDE.md: "No linter or CI config exists in the repo yet")
-- Code follows standard Go conventions without enforcement
+- No linter configured. No `.golangci.yml` or equivalent exists.
+- Code follows standard Go idioms manually
 
-**Line Length:**
-- No enforced limit; lines generally stay under ~120 chars
+## Package Organization
+
+**Package comments:**
+- Every package has a doc comment on the `package` line in one primary file
+- Format: `// Package <name> <does what>.` (e.g., `// Package dispatch fans out rollout events to notification targets via a worker pool.`)
+- See `internal/dispatch/dispatcher.go`, `internal/persistence/hash_store.go`, `internal/models/event.go`
+
+**Package naming:**
+- Short, lowercase, single-word names: `config`, `watcher`, `dispatch`, `models`, `persistence`, `watchlist`
+- Exception: `v1alpha1` for CRD API package (follows Kubernetes convention)
 
 ## Import Organization
 
-**Order (standard Go convention):**
-1. Standard library (`context`, `fmt`, `log/slog`, `sync`)
-2. External dependencies (`k8s.io/...`, `sigs.k8s.io/...`)
-3. Internal packages (`github.com/koolhandluke/k8s-deploy-monitor-operator/internal/...`)
+**Order:**
+1. Standard library imports (`context`, `fmt`, `log/slog`, `sync`, `time`)
+2. External/third-party imports (`k8s.io/...`, `sigs.k8s.io/...`)
+3. Internal project imports (`github.com/koolhandluke/k8s-deploy-monitor-operator/...`)
 
-**Blank line separation** between each group. Example from `internal/watcher/informer.go`:
+**Grouping:**
+- Groups separated by blank lines
+- Within groups, imports are alphabetically sorted
+- Example from `internal/watcher/informer.go`:
 ```go
 import (
     "context"
     "crypto/sha256"
+    "encoding/json"
     "fmt"
+    "log/slog"
+    "sync"
+    "sync/atomic"
+    "time"
 
     appsv1 "k8s.io/api/apps/v1"
+    metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
     "k8s.io/client-go/informers"
     "k8s.io/client-go/kubernetes"
+    "k8s.io/client-go/tools/cache"
 
     "github.com/koolhandluke/k8s-deploy-monitor-operator/internal/models"
 )
 ```
 
-**Path Aliases:**
-- Kubernetes type packages use short aliases: `appsv1`, `corev1`, `metav1`
-- Conflict resolution aliases: `apierrors "k8s.io/apimachinery/pkg/api/errors"`, `utilruntime "k8s.io/apimachinery/pkg/util/runtime"`
-- CRD package alias: `v1alpha1 "github.com/koolhandluke/k8s-deploy-monitor-operator/api/v1alpha1"`
+**Aliases:**
+- Kubernetes API groups use short aliases: `appsv1`, `corev1`, `metav1`
+- CRD API uses version alias: `v1alpha1 "github.com/koolhandluke/k8s-deploy-monitor-operator/api/v1alpha1"`
+- Utility renames for clarity: `utilruntime "k8s.io/apimachinery/pkg/util/runtime"`
+- Fake client aliasing: `ctrlfake "sigs.k8s.io/controller-runtime/pkg/client/fake"`
 
 ## Error Handling
 
 **Patterns:**
-- Wrap errors with `fmt.Errorf("context: %w", err)` for all returned errors
-- Use lowercase error messages starting with a gerund: `"marshalling slack message: %w"`, `"creating controller-runtime client: %w"`
-- Fatal errors in `main()` use `slog.Error()` + `os.Exit(1)` — never `log.Fatal()`
-- Non-fatal errors log and continue: `slog.Warn("failed to load persisted hashes", "cluster", id, "error", err)`
-- Kubernetes API not-found errors checked with `errors.IsNotFound(err)` (from `k8s.io/apimachinery/pkg/api/errors`)
-- Auth errors checked with `apierrors.IsUnauthorized(err) || apierrors.IsForbidden(err)` for permanent failure classification
+- Return `error` as last return value; check immediately: `if err != nil { return ..., fmt.Errorf(...) }`
+- Use `fmt.Errorf` with `%w` for error wrapping: `fmt.Errorf("creating controller-runtime client: %w", err)`
+- Error messages are lowercase, describing the failed action: `"slack webhook failed: %w"`, `"loading cluster state for %s: %w"`
+- Fatal errors in `main()` use `slog.Error(...)` followed by `os.Exit(1)` -- never `log.Fatal`
+- Custom error types for domain-specific cases: `*ConflictError` in `internal/watchlist/store.go`
 
-**Error propagation style:**
+**Error wrapping convention:**
 ```go
-if err := s.client.Create(ctx, state); err != nil {
-    return fmt.Errorf("creating cluster state: %w", err)
-}
+// Always wrap with context about what was being attempted
+return nil, fmt.Errorf("reading config file %s: %w", path, err)
+return fmt.Errorf("creating cluster state: %w", err)
 ```
 
-**Silently defaulting malformed config:**
-- `envInt()` returns `defaultVal` on parse error — no logging, no error
-- This is intentional per CLAUDE.md: "Malformed ints silently fall back to the default"
+**Sentinel error checks:**
+- Use `k8s.io/apimachinery/pkg/api/errors` for Kubernetes API errors: `errors.IsNotFound(err)`, `apierrors.IsUnauthorized(err)`
+- String matching used sparingly for simple cases: `strings.Contains(err.Error(), "not found")` in `internal/watchlist/handler.go`
 
 ## Logging
 
-**Framework:** `log/slog` with JSON handler (stdlib, no third-party logging library)
+**Framework:** `log/slog` with JSON handler — no external logging library
 
-**Setup** in `cmd/monitor/main.go`:
+**Setup pattern** (from `cmd/monitor/main.go`):
 ```go
 slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel})))
 ```
 
-**Log Levels:**
-- `slog.Info` — operational events: startup, watcher started/stopped, rollout detected
-- `slog.Warn` — degraded state: watch errors, failed hash loads, unhealthy watchers
-- `slog.Error` — failures requiring attention: dispatch failures, persistence failures
-- `slog.Debug` — cache operations, skipped events, template hash details
-- Custom `trace.LevelTrace` — deep investigation pipeline detail (enabled via `TRACE=true`)
+**Patterns:**
+- Use structured key-value pairs, never string interpolation in log messages
+- Log messages are lowercase, action-oriented: `"rollout detected"`, `"dispatch queue full, dropping event"`
+- Always include identifying context: `"cluster"`, `"deployment"`, `"error"`
+- Use appropriate levels:
+  - `slog.Error` for failures requiring attention
+  - `slog.Warn` for degraded but recoverable situations (e.g., dropped events, watch reconnects)
+  - `slog.Info` for operational state changes (startup, shutdown, rollout detection)
+  - `slog.Debug` for internal state (cache seeding, hash comparisons)
 
-**Structured key-value pairs** (always use named keys, not positional):
+**Example:**
 ```go
 slog.Info("rollout detected",
     "cluster", w.clusterID,
     "app", event.App,
     "deployment", newDeploy.Namespace+"/"+newDeploy.Name,
+    "images", fmt.Sprintf("%v -> %v", event.OldImages, event.NewImages),
 )
 ```
-
-**Log message conventions:**
-- Lowercase, snake_case for event identifiers: `"watcher_started"`, `"watcher_queued_retry"`, `"zero_active_watchers"`
-- Present tense for state: `"starting rollout monitor"`, `"cluster watcher started"`
-- Past tense for completed actions: `"dispatched to slack"`, `"loaded persisted hashes"`
 
 ## Comments
 
 **When to Comment:**
-- Package-level doc comment on the primary file of each package
-- All exported types, functions, and methods get doc comments
-- Unexported helpers get doc comments when the purpose is non-obvious
-- Step-by-step numbered comments for multi-phase operations (see `Start()` in `internal/watcher/informer.go`)
+- Package-level doc comment on every package (mandatory)
+- Exported types and functions always have doc comments
+- Unexported functions have doc comments explaining intent, not mechanics
+- Comments use `//` style (no block `/* */` comments)
 
 **Doc comment style:**
-```go
-// NewClusterWatcher creates a watcher for a single cluster that detects
-// deployment rollouts by tracking spec.template hash changes.
-func NewClusterWatcher(...) *ClusterWatcher {
-```
+- Start with the name of the thing being documented: `// Debouncer coalesces rapid rollout events...`
+- Constructor docs describe what is returned: `// NewDebouncer creates a Debouncer that waits for...`
+- Method docs describe what happens: `// Submit adds or replaces a pending event...`
 
 **Inline comments:**
-- Used sparingly for non-obvious logic: `// Empty string signals deletion`
-- Phase markers: `// Phase 1: Rescan directory for file changes`
-- Test clarifications: `// expected — no event`, `// expected — filtered out`
+- Used for step-by-step processes: `// Step 1: Create factory with transform...`
+- Used for non-obvious behavior: `// Empty string signals deletion`
+- Used for test intent: `// Should NOT return error because cluster is queued for retry`
 
 ## Function Design
 
-**Size:** Functions are generally 20-60 lines. Longest methods (e.g., `reconcile`, `main`) break work into labeled phases.
+**Size:** Functions are typically 10-40 lines. Largest functions are in `cmd/monitor/main.go` (wiring) and reconcile loops.
 
 **Parameters:**
-- Use concrete types for dependencies, interfaces only where needed for testing (`kubernetes.Interface`, `HashObserver`)
-- Functional options pattern for callbacks: `SetEventEnricher(func(*models.RolloutEvent))`, `SetOnDispatched(func(...))`
-- `context.Context` is always the first parameter
+- Accept interfaces where possible: `kubernetes.Interface` not `*kubernetes.Clientset`
+- Use `func(string) bool` for simple predicates (namespace filter)
+- Accept `*http.Client` as dependency injection for HTTP targets
+- Use `context.Context` as first parameter for anything that does I/O
 
 **Return Values:**
-- Single error return for fallible operations: `func (w *ClusterWatcher) Start(ctx context.Context) error`
-- Multiple returns for status checks: `func HealthStatus() (healthy bool, permanentErr bool, lastErr error)`
-- Named returns only in `DispatchEvent` for clarity: `(targets []string, dispatchErr string)`
+- Single error: `func (s *HashStore) LoadHashes(...) (map[string]string, error)`
+- Multiple named returns for complex cases: `func (d *Dispatcher) DispatchEvent(...) (targets []string, dispatchErr string)`
+- Health status uses multiple returns: `func (w *ClusterWatcher) HealthStatus() (healthy bool, permanentErr bool, lastErr error)`
 
 ## Module Design
 
 **Exports:**
-- Only export what other packages need; internal helpers are unexported
-- Constructor + method pattern: `New<Type>()` creates, methods operate
-- Each package has a clear entry point type (e.g., `Manager` in watcher, `Dispatcher` in dispatch)
+- Export types, constructors, and methods that form the public API
+- Keep internal helpers unexported: `templateHash()`, `stripUnneededFields()`, `envInt()`
+- Use the `internal/` directory to prevent external imports
 
 **Barrel Files:**
-- Not used — Go does not use barrel/index files
+- Not used. Each package exposes types directly from their defining files.
 
-**Interface definition:**
-- Interfaces defined in the consumer package, not the provider (e.g., `Target` in `dispatch`, `HashObserver` in `watcher`)
-- Small interfaces (1-2 methods): `Target{Dispatch(), Name()}`, `HashObserver{OnHashUpdate(), OnHashDelete()}`
+## Interface Design
+
+**Pattern:** Define interfaces where they are consumed, not where they are implemented.
+
+- `Target` interface in `internal/dispatch/dispatcher.go` — implemented by `LogTarget`, `SlackTarget`, `AuditTarget`, etc.
+- `HashObserver` interface in `internal/watcher/informer.go` — implemented by `HashStore`
+- `Investigator` interface in `internal/investigation/orchestrator.go` — implemented by `RunbookInvestigator`, `HolmesInvestigator`
+
+**Minimal interfaces:** Interfaces have 1-2 methods:
+```go
+type Target interface {
+    Dispatch(ctx context.Context, event models.RolloutEvent) error
+    Name() string
+}
+```
 
 ## Concurrency Patterns
 
-**Goroutine lifecycle:**
-- Always use `context.Context` for cancellation
-- `sync.WaitGroup` for goroutine draining on shutdown
-- `sync.Mutex` for shared state (maps), `sync.RWMutex` for read-heavy state (`NamespaceFilter`)
-- `sync/atomic` for counters and flags (`consecutiveErrors`, `permanent`)
-- `atomic.Value` for storing typed values (`lastSuccessTime`, `lastWatchError`)
+**Mutex usage:**
+- Use `sync.Mutex` for state protection with `Lock()`/`Unlock()` and `defer` for unlock
+- Use `sync.RWMutex` for read-heavy data: `NamespaceFilter` uses `RWMutex`
+- Use `atomic` operations for counters: `consecutiveErrors`, `permanent` flag
 
 **Channel patterns:**
-- Buffered channels for event pipelines: `make(chan models.RolloutEvent, cfg.QueueMaxSize)`
-- Non-blocking sends with drop semantics (debouncer)
-- Channel close for shutdown signaling
+- Non-blocking sends for backpressure: `select { case ch <- event: default: slog.Warn(...) }`
+- Buffered channels for event queues: `make(chan models.RolloutEvent, cfg.QueueMaxSize)`
+- Signal channels use `chan struct{}` with buffer 1: `reconcileTriggerCh = make(chan struct{}, 1)`
 
-**Graceful shutdown sequence** (from `main.go`):
-1. Signal received → `manager.Stop()` → `close(eventCh)` → `dispatcher.Wait()` → `cancel()`
+**Goroutine lifecycle:**
+- Use `sync.WaitGroup` for tracking worker goroutines
+- Use `context.Context` for cancellation propagation
+- Always provide a `Stop()` method that drains in-flight work
 
-## CRD Type Conventions
+## Configuration Pattern
 
-**Location:** `api/v1alpha1/`
+**Layered loading** (from `internal/config/config.go`):
+1. Read YAML config file (path from `CONFIG_FILE` env var, default `/etc/rollout-monitor/config.yaml`)
+2. Apply env var overrides for secrets (`SLACK_WEBHOOK_URL`, `SLACK_BOT_TOKEN`, `HOLMES_API_URL`)
+3. Apply defaults for zero values
+4. Validate required dependencies
 
-**Markers:** kubebuilder markers for validation, print columns, and scope:
+**Defaults:** Applied in `applyDefaults()` — check for zero value, set default. Malformed int env vars silently fall back to default.
+
+## HTTP Handler Pattern
+
+**Use `http.NewServeMux`** and `HandleFunc` for routing (from `internal/watchlist/handler.go`):
 ```go
-// +kubebuilder:object:root=true
-// +kubebuilder:resource:scope=Namespaced,shortName=crs
-// +kubebuilder:printcolumn:name="Cluster",type=string,JSONPath=`.spec.clusterID`
+func NewHandler(store *Store, reconcileTrigger chan<- struct{}) http.Handler {
+    mux := http.NewServeMux()
+    handler := func(w http.ResponseWriter, r *http.Request) {
+        // Route based on URL path and method
+    }
+    mux.HandleFunc("/api/v1/watchlist", handler)
+    mux.HandleFunc("/api/v1/watchlist/", handler)
+    return mux
+}
 ```
 
-**Structure:** Standard Kubernetes Spec/Status split:
-- `Spec` holds desired/declarative state
-- `Status` holds observed state with timestamps
+**Response pattern:**
+- Set `Content-Type: application/json` before writing
+- Use `json.NewEncoder(w).Encode(...)` for JSON responses
+- Use `http.Error(w, message, statusCode)` for error responses
 
 ---
 
-*Convention analysis: 2026-07-23*
+*Convention analysis: 2026-07-26*

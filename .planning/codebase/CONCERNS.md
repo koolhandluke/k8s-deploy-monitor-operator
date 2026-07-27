@@ -1,178 +1,195 @@
 # Codebase Concerns
 
-**Analysis Date:** 2026-07-23
+**Analysis Date:** 2026-07-26
 
 ## Tech Debt
 
-**Committed binaries in repo root:**
-- Issue: Two large Go binaries (`monitor` at 61MB, `dispatcher` at 46MB) are tracked in git at the repo root. `.gitignore` only ignores `rollout-monitor` (not `monitor` or `dispatcher`).
-- Files: `/monitor`, `/dispatcher`, `.gitignore`
-- Impact: Bloats repo clone size by ~107MB. Every clone downloads these binaries. Git history permanently stores them.
-- Fix approach: Add `monitor` and `dispatcher` to `.gitignore`, remove them with `git rm --cached monitor dispatcher`, and force-push or use BFG to clean history.
+**Shutdown ordering — cancel() called after component cleanup:**
+- Issue: In `cmd/monitor/main.go` (lines 340-351), `cancel()` is called *after* `manager.Stop()`, `close(eventCh)`, `dispatcher.Wait()`, and `orchestrator.Stop()`. Since these components receive `ctx` at start time, `cancel()` should fire first to signal all goroutines before draining. The current order works only because `Stop()` methods use their own internal stop mechanisms, but `hashStore.FlushLoop` and `configWatcher.Start` depend on `ctx` cancellation.
+- Files: `cmd/monitor/main.go`
+- Impact: On shutdown, the hashStore flush loop and config watcher may not terminate promptly; the final flush in `FlushLoop` uses `context.Background()` as a workaround (line 94 in `internal/persistence/hash_store.go`).
+- Fix approach: Move `cancel()` before `manager.Stop()` and restructure shutdown to use the cancelled context as the primary stop signal.
 
-**go.mod requires nonexistent Go version:**
-- Issue: `go.mod` declares `go 1.25.6` which does not exist. CLAUDE.md documents this as a known issue (previously the Dockerfile used `golang:1.22-alpine` but has been updated to `golang:1.25-alpine` which also does not exist).
-- Files: `go.mod` (line 3), `Dockerfile` (line 1)
-- Impact: Docker builds fail when using standard Go images. Local builds work because the local Go toolchain ignores the directive if it is newer. CI would break.
-- Fix approach: Set `go.mod` to a real Go version (e.g., `go 1.22`) and match the Dockerfile base image (`golang:1.22-alpine`).
+**Persistence client uses first cluster's REST config for CRD operations:**
+- Issue: `initK8sClients` in `cmd/monitor/main.go` (line 358-378) always uses `clusters[0].RestConfig` for the persistence client. If the CRDs live on a different cluster (e.g. a management cluster), this silently uses the wrong config.
+- Files: `cmd/monitor/main.go`
+- Impact: Multi-cluster deployments where CRDs are not on the first alphabetically-sorted cluster will fail to persist state.
+- Fix approach: Add a `PERSISTENCE_KUBECONFIG` env var or config field to explicitly specify the target cluster for CRD operations, falling back to in-cluster config.
 
-**Legacy diagnostic path still wired in:**
-- Issue: `cmd/monitor/main.go` lines 197-204 have a "legacy diagnostic target (backward compat)" branch for `DiagnosticEnabled` that creates an `AsyncDiagnosticTarget` separately from the newer `InvestigationMode` system. The config also has backward-compat mapping in `applyDefaults()` (lines 238-247) that translates old `DISPATCH_MODE` values to `InvestigationMode`.
-- Files: `cmd/monitor/main.go` (lines 197-204), `internal/config/config.go` (lines 238-247), `internal/diagnostic/target.go`
-- Impact: Two parallel code paths for the same feature. Maintenance burden and confusion about which path is active. The backward-compat mapping uses `slog.Warn` but the deprecation is never enforced.
-- Fix approach: Set a timeline to remove `DiagnosticEnabled` and the `DISPATCH_MODE` backward-compat mapping. Migrate any users to `investigationMode` config.
+**Dispatcher only captures last target error:**
+- Issue: `DispatchEvent` in `internal/dispatch/dispatcher.go` (line 82) overwrites `dispatchErr` on each target failure, so only the last failing target's error is recorded.
+- Files: `internal/dispatch/dispatcher.go`
+- Impact: When multiple targets fail, the audit record only shows the last error, losing diagnostic information.
+- Fix approach: Collect all errors into a slice and join them for the dispatch error string.
 
-**No persistence tests:**
-- Issue: `internal/persistence/` has zero test files. `HashStore` (batched flush with re-queue on failure), `AuditRecorder` (CRD creation and status updates), and `sanitizeName` are all untested.
-- Files: `internal/persistence/hash_store.go`, `internal/persistence/audit_recorder.go`, `internal/persistence/names.go`
-- Impact: The flush/re-queue logic in `HashStore.flush()` is non-trivial (re-queuing failed updates without overwriting newer pending values) and has no coverage. Bugs here cause silent data loss of hash state, which would trigger false rollout detections on restart.
-- Fix approach: Add unit tests using `fake` controller-runtime client. Test flush, re-queue, create-vs-update paths, and `sanitizeName` edge cases.
+**Holmes result classification is naive substring matching:**
+- Issue: `internal/investigation/holmes.go` (lines 116-119) classifies a Holmes investigation as failed if the response contains "fail", "error", or "crash" anywhere in the text. This produces false positives (e.g. "no errors found" maps to `ResultFailed`).
+- Files: `internal/investigation/holmes.go`
+- Impact: Investigation reports may incorrectly classify healthy rollouts as failed.
+- Fix approach: Have Holmes API return a structured `result` field, or use more nuanced NLP/regex patterns that account for negation.
 
-**No cmd/ tests:**
-- Issue: Neither `cmd/monitor/` nor `cmd/dispatcher/` have test files. The wiring in `main.go` (313 lines for monitor, 140 for dispatcher) is validated only by manual testing.
-- Files: `cmd/monitor/main.go`, `cmd/dispatcher/main.go`
-- Impact: Configuration validation, target registration order, and shutdown sequencing are untested. Integration issues (e.g., wrong shutdown order) can only be caught in production.
-- Fix approach: Extract wiring into a `run()` function that accepts dependencies and add integration-style tests.
+**Silent int parse fallback:**
+- Issue: `envInt` in `internal/config/config.go` (line 326) silently returns the default value when an env var contains a malformed integer. This is documented behavior but makes typos invisible (e.g. `WORKER_COUNT=3x` silently becomes 3).
+- Files: `internal/config/config.go`
+- Impact: Misconfigured deployments run with unexpected defaults.
+- Fix approach: Log a warning when parsing fails so operators can catch typos.
 
-**Debouncer.Stop() drops pending events:**
-- Issue: `Debouncer.Stop()` cancels all pending timers and deletes pending events without emitting them. On graceful shutdown, any events still in the debounce window are silently lost.
-- Files: `internal/watcher/debouncer.go` (lines 79-88)
-- Impact: Rollouts detected within `DEBOUNCE_SECONDS` of shutdown are never dispatched. With the default 30s debounce, this is a meaningful window.
-- Fix approach: Add a `Flush()` method that emits all pending events immediately, and call it during shutdown before `Stop()`.
+**Duplicated Slack message formatting:**
+- Issue: `SlackTarget.Dispatch` (`internal/dispatch/slack.go`) and `SlackBotTarget.Dispatch` (`internal/dispatch/slack_bot.go`) contain identical message formatting logic.
+- Files: `internal/dispatch/slack.go`, `internal/dispatch/slack_bot.go`
+- Impact: Message format changes must be applied in two places.
+- Fix approach: Extract shared message formatting into a helper function.
+
+**Legacy diagnostic target coexists with investigation system:**
+- Issue: `cmd/monitor/main.go` (lines 228-235) maintains backward-compat for a legacy `DiagnosticEnabled` flag that creates an `AsyncDiagnosticTarget`. This path is redundant now that the investigation orchestrator exists.
+- Files: `cmd/monitor/main.go`, `internal/diagnostic/target.go`
+- Impact: Two code paths achieve the same goal; increases maintenance burden.
+- Fix approach: Deprecate `DIAGNOSTIC_ENABLED` with a migration guide pointing to `investigationMode: runbook`.
 
 ## Known Bugs
 
-**Shutdown ordering: cancel() called after close(eventCh):**
-- Symptoms: In `cmd/monitor/main.go` lines 275-286, shutdown calls `manager.Stop()`, `close(eventCh)`, `dispatcher.Wait()`, then `cancel()`. But `cancel()` is the context cancel that the `HashStore.FlushLoop` and `ConfigWatcher` goroutines depend on. The `FlushLoop` does a final flush on context cancellation (line 94 of hash_store.go), but by the time `cancel()` is called, the event channel is already closed and dispatcher workers have drained. Meanwhile, the `FlushLoop` goroutine started with `go hashStore.FlushLoop(ctx, 5*time.Second)` is still running and might try to flush while the manager is already stopped.
-- Files: `cmd/monitor/main.go` (lines 275-286), `internal/persistence/hash_store.go` (lines 86-100)
-- Trigger: Graceful shutdown via SIGTERM/SIGINT.
-- Workaround: In practice the flush loop's final flush uses `context.Background()` and the controller-runtime client should still work, so this is unlikely to cause actual data loss. But the ordering is logically incorrect.
-
-**Orchestrator cleanup has dead code in defer:**
-- Symptoms: In `internal/investigation/orchestrator.go` lines 103-118, the defer cleanup checks `if cancel, ok := o.active[key]; ok && cancel == nil` (line 106) which will never be true because the value stored at line 92 is always non-nil (`invCancel`). Then it immediately checks `if _, ok := o.active[key]; ok` (line 110) and deletes — making the first check dead code.
-- Files: `internal/investigation/orchestrator.go` (lines 103-118)
-- Trigger: Every investigation completion.
-- Workaround: The second check handles cleanup correctly, so this is cosmetic.
-
-**Holmes result classification is naive:**
-- Symptoms: `internal/investigation/holmes.go` lines 116-120 classify Holmes results by checking if the response contains "fail", "error", or "crash" as substrings. This will false-positive on responses like "No errors detected" or "The deployment did not fail."
-- Files: `internal/investigation/holmes.go` (lines 114-120)
-- Trigger: Any Holmes response mentioning these words in a negative context.
-- Workaround: None. Users see incorrect `ResultFailed` classifications.
+**Orchestrator active map cleanup logic is redundant:**
+- Symptoms: The deferred cleanup in `internal/investigation/orchestrator.go` (lines 103-118) has two consecutive `if _, ok := o.active[key]` checks. The first checks `cancel == nil` which will never match (cancel functions are non-nil), making it dead code. The second always deletes regardless of supersede.
+- Files: `internal/investigation/orchestrator.go`
+- Trigger: When a supersede happens, the old goroutine's defer may delete the new goroutine's entry from the active map, causing the new investigation to not be tracked.
+- Workaround: The race window is small and the consequence is only a missed supersede log message, but it could cause a goroutine leak if `Stop()` is called at the wrong moment.
 
 ## Security Considerations
 
-**RBAC too narrow for diagnostic features:**
-- Risk: `deploy/deployment.yaml` ClusterRole only grants `get/list/watch` on `apps/deployments`. But when `InvestigationMode` is enabled, the `RolloutAnalyzer` also needs: `get/list` on `apps/replicasets`, `get/list` on `core/pods`, `get` on `core/pods/log`, and `list` on `core/events`. The deployment manifest does not include these permissions.
-- Files: `deploy/deployment.yaml` (lines 17-20), `internal/diagnostic/analyzer.go` (lines 607-651, 486-513, 516-604)
-- Current mitigation: None. The diagnostic features will get 403 errors at runtime if the ClusterRole is applied as-is.
-- Recommendations: Add the required RBAC rules to `deploy/deployment.yaml` or create a separate ClusterRole for the diagnostic feature. Also need CRD read/write permissions when `PERSISTENCE_ENABLED=true` (`deploy-monitor.io` API group).
+**HTTP APIs have no authentication or authorization:**
+- Risk: The watchlist API (`:8080`) and status API (`:8081`) accept unauthenticated requests. The watchlist API allows PUT/DELETE operations that modify what the operator watches.
+- Files: `internal/watchlist/handler.go`, `internal/investigation/status_api.go`
+- Current mitigation: These ports are only exposed within the cluster (no Ingress in the deployment manifest).
+- Recommendations: Add authentication middleware (e.g. bearer token validation, K8s service account token review) before exposing these APIs externally. At minimum, add rate limiting.
 
-**No health/readiness probes in deployment manifest:**
-- Risk: The Kubernetes deployment has no liveness or readiness probes. If the process hangs (e.g., deadlock in informer cache sync), Kubernetes will not restart it.
-- Files: `deploy/deployment.yaml`
-- Current mitigation: The status API server (port 8081) exists when trace mode is enabled, but it is not configured as a probe endpoint and is only active with `TRACE=true`.
-- Recommendations: Add a `/healthz` endpoint that checks watcher health status, and configure it as a liveness probe. Add a `/readyz` endpoint for readiness.
+**No input validation on watchlist PUT body beyond `clusters` presence:**
+- Risk: The PUT handler at `internal/watchlist/handler.go` (line 54) only validates that `clusters` is non-empty. Arbitrary strings for `slackChannel`, app name, cluster IDs, and namespace names are accepted without sanitization.
+- Files: `internal/watchlist/handler.go`
+- Current mitigation: CRD naming in the store layer sanitizes the name for K8s compatibility.
+- Recommendations: Validate that cluster IDs, namespaces, and channel names match expected patterns. Reject injection-prone characters.
 
-**Slack webhook URLs and bot tokens in config file:**
-- Risk: The YAML config file at `/etc/rollout-monitor/config.yaml` can contain `slackWebhookURL` and `slackBotToken` directly. If this config is stored in a ConfigMap (not a Secret), these values are visible in plain text.
-- Files: `internal/config/config.go` (lines 47-48, struct fields)
-- Current mitigation: Env var overrides exist for these fields (lines 131-138), allowing Secret-based injection. The `applyEnvOverrides` doc comment mentions "supports Secret mounts."
-- Recommendations: Document that sensitive fields should use env var overrides from Kubernetes Secrets, never be placed directly in the config file.
+**Slack bot token stored in config struct without redaction:**
+- Risk: The `SlackBotToken` field in the `Config` struct could be logged if the struct is ever serialized for debugging. The token is passed in the `Authorization` header (`internal/dispatch/slack_bot.go` line 68).
+- Files: `internal/config/config.go`, `internal/dispatch/slack_bot.go`
+- Current mitigation: Structured logging does not dump the full config struct; the startup log in `cmd/monitor/main.go` selectively logs safe fields.
+- Recommendations: Add a `String()` or `MarshalJSON()` method to `Config` that redacts sensitive fields.
 
 ## Performance Bottlenecks
 
-**LoadDirectorySnapshot called on every retry tick:**
-- Problem: During `reconcile()` Phase 3, every pending retry calls `config.LoadDirectorySnapshot(m.kubeconfigDir)` which reads and parses all kubeconfig files in the directory. With the reconcile loop ticking every 10s and multiple pending clusters, this means repeated full directory scans.
-- Files: `internal/watcher/manager.go` (lines 316-326)
-- Cause: Each retry entry reloads the full directory snapshot independently rather than sharing the result from Phase 1.
-- Improvement path: Reuse the directory snapshot from the rescan phase (Phase 1) and pass it to Phase 3. Only call `LoadDirectorySnapshot` once per reconcile cycle.
+**TTL cleaner and stuck record recovery list all CRDs without field selectors:**
+- Problem: `doRecoverStuck` (`internal/dispatch/record_watcher.go` line 208) and `cleanup` (`internal/dispatch/ttl_cleaner.go` line 60) list *all* RolloutRecord CRDs in the namespace, then filter in-memory.
+- Files: `internal/dispatch/record_watcher.go`, `internal/dispatch/ttl_cleaner.go`
+- Cause: No label selector or field selector is used to narrow the list to relevant records (Processing phase for stuck recovery, terminal phase for TTL).
+- Improvement path: Add a phase label to RolloutRecord CRDs on creation/update, then use label selectors in list calls. For large-scale deployments with thousands of records, this prevents loading the entire CRD list into memory.
 
-**Unbounded log fetching in diagnostic analyzer:**
-- Problem: `fetchLogs` reads up to `LogTailLines` (default 500) lines per container, per pod, for both current and previous logs. For deployments with many pods/containers, this generates significant API traffic and memory allocation.
-- Files: `internal/diagnostic/analyzer.go` (lines 544-604)
-- Cause: No limit on total log volume across all pods. A deployment with 10 pods and 3 containers each = 60 log API calls.
-- Improvement path: Add a cap on total pods to inspect (e.g., 5) and total log bytes across all containers.
+**LoadDirectorySnapshot called multiple times per reconcile cycle:**
+- Problem: During a single reconcile tick, `LoadDirectorySnapshot` is called in `rescanDirectory`, `loadClusterFromDir`, and potentially once per pending retry entry (line 347 in `internal/watcher/manager.go`). Each call re-reads and parses all kubeconfig files.
+- Files: `internal/watcher/manager.go`
+- Cause: No caching of the directory snapshot within a reconcile pass.
+- Improvement path: Load the snapshot once at the start of `reconcile()` and pass it to all phases.
+
+**templateHash marshals the entire PodTemplateSpec every event:**
+- Problem: `templateHash` in `internal/watcher/informer.go` (line 292) calls `json.Marshal` on `deploy.Spec.Template` for every add/update event.
+- Files: `internal/watcher/informer.go`
+- Cause: SHA256 needs bytes; JSON marshalling is the simplest way to get deterministic bytes.
+- Improvement path: This is an acceptable tradeoff for correctness. If profiling shows this as hot, consider using `deploy.Spec.Template.String()` or a faster serializer.
 
 ## Fragile Areas
 
-**Debouncer timer race on Stop:**
+**Debouncer timer lifecycle during Stop:**
 - Files: `internal/watcher/debouncer.go`
-- Why fragile: `time.AfterFunc` callbacks execute in their own goroutine. If `Stop()` is called while `emit()` is running, the `emit` goroutine has already been spawned and will try to send on the output channel. Since `Stop()` is called before `close(eventCh)` in shutdown (manager.Stop calls debouncer.Stop), this could panic if the channel is closed between the Stop and the emit completing.
-- Safe modification: Always call `Stop()` before closing the output channel. The current shutdown order in `main.go` does this correctly (manager.Stop then close(eventCh)), but it is easy to break.
-- Test coverage: `internal/watcher/debouncer_test.go` exists but does not test concurrent Stop+emit races.
+- Why fragile: `Stop()` calls `t.Stop()` for all timers, but a timer callback (`emit`) may already be running concurrently. The `emit` function acquires the lock and deletes from `pending`/`timers`, which races with `Stop`'s iteration if not careful. Currently safe because `Stop` holds the lock while iterating, but `emit` callbacks fired by `time.AfterFunc` before `Stop` acquires the lock could try to send on a closed `eventCh`.
+- Safe modification: Always ensure `eventCh` is closed *after* debouncer.Stop() completes. The current shutdown order in `cmd/monitor/main.go` does this correctly (`manager.Stop()` calls `debouncer.Stop()` before `close(eventCh)`).
+- Test coverage: `internal/watcher/debouncer_test.go` exists but does not test concurrent Stop + emit races.
 
-**Manager.Start unlocks/relocks mutex during staggered startup:**
-- Files: `internal/watcher/manager.go` (lines 152-161)
-- Why fragile: The staggered startup loop temporarily unlocks `m.mu` to sleep for 1s between clusters, then re-acquires it. During this window, `reconcileLoop` or `rescanDirectory` could run (though they shouldn't be started yet). More concerning: if the context is cancelled during the sleep, the function re-locks and returns, but some watchers may be partially started.
-- Safe modification: The unlock/relock pattern is intentional to avoid holding the mutex during sleep. Keep the mutex acquisition order consistent and ensure no other goroutine accesses the manager before Start returns.
-- Test coverage: `internal/watcher/manager_test.go` tests multi-cluster start but not concurrent access during staggered startup.
+**Manager lock release during staggered startup:**
+- Files: `internal/watcher/manager.go` (lines 172-182)
+- Why fragile: `Start()` temporarily releases `m.mu` during the 1-second stagger sleep between cluster startups. Any concurrent call that acquires `m.mu` during this window can observe partially-initialized state (some watchers started, others not yet).
+- Safe modification: No external callers access the manager during `Start()` in practice, but if the reconcile loop or watchlist trigger fires early, it could see inconsistent state. The reconcile loop starts *after* `Start()` returns, so this is safe today.
+- Test coverage: Manager tests use a fake clientset factory and don't test concurrent access during startup.
 
-**Health-check recycles watchers without RestConfig:**
-- Files: `internal/watcher/manager.go` (lines 270-305)
-- Why fragile: When an unhealthy watcher is detected in Phase 2, it is removed and queued for retry. But the `retryEntry` is constructed with only `ID: w.clusterID` — the `RestConfig` is nil (line 291). Phase 3 then tries to reload from the directory, but if the kubeconfig file is missing or unreadable, the cluster enters an infinite retry loop with "nil RestConfig" warnings.
-- Safe modification: Store the original `ClusterInfo` (including `RestConfig`) alongside the watcher so it can be reused for retry without re-reading from disk.
-- Test coverage: `TestReconcile_HealthCheckRecyclesUnhealthyWatcher` exists but uses a mock clientset factory, so the nil RestConfig path is not exercised.
+**Hash store flush re-queue on failure:**
+- Files: `internal/persistence/hash_store.go` (lines 114-126)
+- Why fragile: When `upsertClusterState` fails, pending hashes are re-queued. But the re-queue uses "don't overwrite newer" semantics that could lose a deletion signal (empty-string hash) if a new update for the same key arrived during the failed flush.
+- Safe modification: Ensure empty-string (deletion) signals take priority over non-empty values during re-queue.
+- Test coverage: No test covers the re-queue path for failed flushes.
 
 ## Scaling Limits
 
-**Template cache is unbounded per cluster:**
-- Current capacity: One entry per deployment per cluster (key = `clusterID/namespace/name`, value = 64-char hex string). ~150 bytes per entry.
-- Limit: With 1000+ deployments across many clusters, the in-memory cache grows linearly. At ~150 bytes/entry, 10,000 deployments = ~1.5MB which is fine, but the 128Mi memory limit leaves little headroom for informer caches and log buffers.
-- Scaling path: The `stripUnneededFields` transform already reduces informer memory. If scaling beyond ~5,000 deployments, increase the memory limit or add cache eviction for deleted deployments (already handled by `onDelete`).
+**Single-goroutine CRD write path for persistence:**
+- Current capacity: Adequate for dozens of clusters with moderate deployment churn (flush every 5s batches well).
+- Limit: With hundreds of clusters and thousands of deployments, the single `upsertClusterState` call per cluster per flush could bottleneck on API server latency. Each flush does a Get+Update (two API calls) per dirty cluster.
+- Scaling path: Parallelize flush across clusters or use server-side apply (SSA) with patch to reduce to one API call per cluster.
 
-**Single-replica persistence writes:**
-- Current capacity: `HashStore` and `AuditRecorder` use a single controller-runtime client connected to the first cluster. All CRD writes go to one API server.
-- Limit: At high event rates, CRD update conflicts (optimistic locking) can cause re-queues in `flush()`. The 5s flush interval batches well, but burst rollouts across many clusters could saturate the API server.
-- Scaling path: The `DispatcherSplit` mode exists for horizontal scaling, where the monitor only writes CRDs and a separate dispatcher service processes them.
+**In-memory template cache unbounded within a cluster:**
+- Current capacity: Memory usage is bounded by the number of deployments across all watched clusters. With `stripUnneededFields`, each cache entry is ~100 bytes (key + 64-char SHA256 hash).
+- Limit: At 10,000 deployments per cluster across 50 clusters, the cache consumes ~50MB — well within the 128Mi limit. Beyond that, the informer's own cache (full Deployment objects) is the real bottleneck.
+- Scaling path: The 128Mi memory limit in `deploy/deployment.yaml` should be reviewed if watching more than ~100 clusters.
 
 ## Dependencies at Risk
 
-**go.mod Go version 1.25.6:**
-- Risk: This Go version does not exist. All Go releases follow `1.xx` or `1.xx.y` versioning, and Go 1.25 has not been released as of the analysis date.
-- Impact: `go mod tidy` on any system with a real Go toolchain may behave unpredictably. Docker builds with standard Go images fail.
-- Migration plan: Change to a real Go version (e.g., `go 1.22` to match the k8s client-go v0.31.0 dependency requirements).
+**go.mod declares go 1.25.6 — non-existent Go version:**
+- Risk: `go.mod` specifies `go 1.25.6` which does not exist (Go versions follow 1.2x.y pattern as of 2026). The Dockerfile uses `golang:1.25-alpine`. If this was meant to be `go 1.23.6` or a future version, the mismatch will cause build failures when the go directive is enforced.
+- Impact: `go build` may fail depending on the local toolchain's version negotiation. Docker builds depend on whether `golang:1.25-alpine` resolves to a valid image tag.
+- Migration plan: Pin `go.mod` to the actual Go version used in development and match it in the Dockerfile.
+
+**gopkg.in/yaml.v3 used only via config, but yaml.v2 also in dependency tree:**
+- Risk: Both `gopkg.in/yaml.v2` and `gopkg.in/yaml.v3` are indirect dependencies. `config.go` imports `gopkg.in/yaml.v3` directly (line 12). Having both versions increases binary size and potential confusion.
+- Impact: Low — v2 is pulled transitively by K8s client-go libraries.
+- Migration plan: No action needed; transitive dependency.
 
 ## Missing Critical Features
 
-**No CI/CD pipeline:**
-- Problem: No `.github/workflows/`, `.gitlab-ci.yml`, `Makefile`, or any CI configuration exists. CLAUDE.md explicitly states "No linter or CI config exists in the repo yet."
-- Blocks: Automated testing, linting, image builds, and deployment are all manual. No gate prevents broken code from being merged.
+**No health/readiness endpoints:**
+- Problem: Neither `cmd/monitor/main.go` nor `cmd/dispatcher/main.go` expose `/healthz` or `/readyz` endpoints.
+- Blocks: Kubernetes liveness/readiness probes cannot be configured, so the pod stays "Running" even if all cluster watchers have failed permanently or the dispatcher cannot reach the API server.
 
 **No metrics/observability:**
-- Problem: No Prometheus metrics, no `/metrics` endpoint, no metric counters for key operations (events detected, events dispatched, events dropped, dispatch failures, active watchers, pending retries, queue depth).
-- Blocks: Cannot monitor the monitor. No alerting on queue full, dropped events, or unhealthy watchers in production. All observability is through structured log output only.
+- Problem: No Prometheus metrics are exported. The only observability is structured log output.
+- Blocks: Cannot create dashboards or alerts for: events dropped due to full queue, dispatch failures, watcher health, investigation durations, hash flush latency. Operators must grep logs for monitoring.
 
-**No graceful drain of in-flight events:**
-- Problem: On shutdown, the debouncer discards pending events, in-flight dispatcher work completes but newly debounced events are lost. There is no mechanism to drain the pipeline before exit.
-- Blocks: Clean shutdown without event loss during rolling updates.
+**No graceful drain for in-flight investigations on shutdown:**
+- Problem: `Orchestrator.Stop()` calls `o.cancel()` and `o.wg.Wait()`, cancelling all investigations immediately. Investigations that are nearly complete lose their results.
+- Blocks: Long-running Holmes investigations (up to 5-minute timeout) will always be cancelled on rolling updates.
 
 ## Test Coverage Gaps
 
-**Persistence layer (zero coverage):**
-- What's not tested: `HashStore` flush/re-queue logic, `AuditRecorder` create/update paths, `sanitizeName` edge cases (empty string, strings >63 chars, strings with only special chars).
-- Files: `internal/persistence/hash_store.go`, `internal/persistence/audit_recorder.go`, `internal/persistence/names.go`
-- Risk: The flush re-queue logic (lines 104-128 of hash_store.go) is the most critical untested code — bugs here cause either silent hash data loss or unbounded memory growth from accumulating failed updates.
+**No tests for `cmd/monitor/main.go` or `cmd/dispatcher/main.go`:**
+- What's not tested: Startup wiring, config validation interactions, shutdown sequencing, signal handling.
+- Files: `cmd/monitor/main.go`, `cmd/dispatcher/main.go`
+- Risk: Wiring bugs (wrong order of operations, nil pointer on disabled features) only caught at runtime.
+- Priority: Medium
+
+**No tests for `internal/persistence/hash_store.go`:**
+- What's not tested: `FlushLoop`, `flush`, `upsertClusterState`, re-queue on failure, create vs update paths.
+- Files: `internal/persistence/hash_store.go`
+- Risk: Hash persistence is critical for gap detection across restarts. A bug here means missed rollout events.
 - Priority: High
 
-**Main wiring (zero coverage):**
-- What's not tested: Config-to-component wiring, target registration order, shutdown sequencing, split-mode goroutine behavior.
-- Files: `cmd/monitor/main.go`, `cmd/dispatcher/main.go`
-- Risk: Shutdown ordering bugs (documented above) and configuration edge cases are not caught. The split-mode event loop (lines 142-149) has no error handling for channel closure.
+**No tests for `internal/persistence/audit_recorder.go`:**
+- What's not tested: Audit record creation, status updates, CRD interaction.
+- Files: `internal/persistence/audit_recorder.go`
+- Risk: Audit trail could silently fail without detection.
 - Priority: Medium
 
-**Holmes investigator:**
-- What's not tested: The retry logic, response parsing, and naive result classification in `HolmesInvestigator.Investigate()`.
-- Files: `internal/investigation/holmes.go`
-- Risk: The retry creates a new request but does not verify the body is re-readable (it uses `bytes.NewReader` which is safe, but the second `http.NewRequestWithContext` call at line 82 ignores its error). The result classification false-positive issue is untested.
-- Priority: Medium
-
-**ConfigWatcher:**
-- What's not tested: `ConfigWatcher` has no dedicated test file. Initial sync, dynamic watch handling, and status update paths are untested.
+**No tests for `internal/watcher/config_watcher.go`:**
+- What's not tested: Initial sync, dynamic informer event handling, status update write-back.
 - Files: `internal/watcher/config_watcher.go`
-- Risk: Runtime namespace filter updates are a critical operational feature. Bugs here cause either watching too many or too few namespaces with no automated test coverage.
+- Risk: Runtime namespace filter changes via MonitorConfig CRD could break silently.
+- Priority: Medium
+
+**No tests for `internal/watcher/namespace_filter.go`:**
+- What's not tested: Thread-safe `Allowed` and `Update` methods, allowlist-takes-precedence logic.
+- Files: `internal/watcher/namespace_filter.go`
+- Risk: Low — logic is simple, but concurrent update behavior is untested.
+- Priority: Low
+
+**No integration tests or end-to-end tests:**
+- What's not tested: Full pipeline from kubeconfig loading through event detection, debounce, dispatch, and persistence.
+- Files: All packages
+- Risk: Unit tests cover individual components but cross-package interactions (e.g. enricher + dispatcher + persistence) are untested.
 - Priority: Medium
 
 ---
 
-*Concerns audit: 2026-07-23*
+*Concerns audit: 2026-07-26*
