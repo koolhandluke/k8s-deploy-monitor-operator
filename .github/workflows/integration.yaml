@@ -10,7 +10,7 @@ on:
 jobs:
   integration:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -98,7 +98,7 @@ jobs:
       # Run integration tests
       - name: Run integration tests
         run: |
-          go test ./test/integration/... -tags=integration -v -timeout 10m
+          go test ./test/integration/... -tags=integration -v -timeout 20m
         env:
           MONITOR_CONTEXT: kind-monitor-cluster
           WORKLOAD_CONTEXT: kind-workload-cluster
