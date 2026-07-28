@@ -83,7 +83,7 @@ jobs:
       # Wait for operator pod to be ready
       - name: Wait for operator pod
         run: |
-          kubectl rollout status deployment/deploy-monitor-deploy-monitor \
+          kubectl rollout status deployment/deploy-monitor \
             -n rollout-monitor --context kind-monitor-cluster --timeout=60s
 
       # Debug: show operator logs if something is wrong
