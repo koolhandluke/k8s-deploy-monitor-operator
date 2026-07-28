@@ -55,7 +55,7 @@ jobs:
           # Create namespace and ConfigMap with the fixed kubeconfig
           kubectl create namespace rollout-monitor --context kind-monitor-cluster
           kubectl create configmap kubeconfig \
-            --from-file=workload=/tmp/workload.yaml \
+            --from-file=workload.yaml=/tmp/workload.yaml \
             -n rollout-monitor --context kind-monitor-cluster
 
       # Install CRDs on monitor-cluster
