@@ -1,0 +1,115 @@
+name: Integration Tests
+
+on:
+  pull_request:
+    branches: [master]
+  workflow_dispatch: {}
+
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # Create both kind clusters
+      - name: Create monitor-cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: monitor-cluster
+
+      - name: Create workload-cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: workload-cluster
+
+      # Build operator image and load into monitor-cluster
+      - name: Build operator image
+        run: docker build -t rollout-monitor:integration .
+
+      - name: Load image into monitor-cluster
+        run: kind load docker-image rollout-monitor:integration --name monitor-cluster
+
+      # Generate kubeconfig for workload-cluster and fix server address for in-pod access
+      - name: Setup cross-cluster kubeconfig
+        run: |
+          # Get workload-cluster kubeconfig
+          kind get kubeconfig --name workload-cluster > /tmp/workload.yaml
+
+          # The kubeconfig uses 127.0.0.1:<port> which won't work from inside
+          # the monitor pod. Replace with the kind container's Docker-internal IP.
+          WORKLOAD_IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' workload-cluster-control-plane)
+          WORKLOAD_PORT=$(docker inspect -f '{{(index (index .NetworkSettings.Ports "6443/tcp") 0).HostPort}}' workload-cluster-control-plane)
+          echo "Workload cluster container IP: ${WORKLOAD_IP}, host port: ${WORKLOAD_PORT}"
+
+          # Replace the server address: 127.0.0.1:<mapped-port> -> <container-ip>:6443
+          sed -i "s|https://127.0.0.1:${WORKLOAD_PORT}|https://${WORKLOAD_IP}:6443|g" /tmp/workload.yaml
+
+          # Verify the replacement
+          grep "server:" /tmp/workload.yaml
+
+          # Create namespace and ConfigMap with the fixed kubeconfig
+          kubectl create namespace rollout-monitor --context kind-monitor-cluster
+          kubectl create configmap kubeconfig \
+            --from-file=workload=/tmp/workload.yaml \
+            -n rollout-monitor --context kind-monitor-cluster
+
+      # Install CRDs on monitor-cluster
+      - name: Install CRDs
+        run: kubectl apply -f chart/deploy-monitor/crds/ --context kind-monitor-cluster
+
+      # Deploy operator via Helm
+      - name: Deploy operator via Helm
+        run: |
+          helm upgrade --install deploy-monitor chart/deploy-monitor \
+            --namespace rollout-monitor --kube-context kind-monitor-cluster \
+            --set image.repository=rollout-monitor \
+            --set image.tag=integration \
+            --set image.pullPolicy=Never \
+            --set kubeconfig.configMapName=kubeconfig \
+            --set investigation.mode=runbook \
+            --set persistence.enabled=true \
+            --set dispatch.mode=slack \
+            --set dispatch.slackWebhookUrl=http://test \
+            --set tuning.debounceSeconds=5 \
+            --set logging.trace=true \
+            --set "namespaceFilter.denylist={kube-system,kube-public,kube-node-lease}" \
+            --wait --timeout 120s
+
+      # Wait for operator pod to be ready
+      - name: Wait for operator pod
+        run: |
+          kubectl rollout status deployment/deploy-monitor-deploy-monitor \
+            -n rollout-monitor --context kind-monitor-cluster --timeout=60s
+
+      # Debug: show operator logs if something is wrong
+      - name: Show operator logs
+        if: always()
+        run: |
+          kubectl logs -l app.kubernetes.io/name=deploy-monitor \
+            -n rollout-monitor --context kind-monitor-cluster --tail=50 || true
+
+      # Run integration tests
+      - name: Run integration tests
+        run: |
+          go test ./test/integration/... -tags=integration -v -timeout 10m
+        env:
+          MONITOR_CONTEXT: kind-monitor-cluster
+          WORKLOAD_CONTEXT: kind-workload-cluster
+          MONITOR_NAMESPACE: rollout-monitor
+
+      # Collect logs on failure
+      - name: Collect operator logs on failure
+        if: failure()
+        run: |
+          echo "=== Operator Logs ==="
+          kubectl logs -l app.kubernetes.io/name=deploy-monitor \
+            -n rollout-monitor --context kind-monitor-cluster --tail=200 || true
+          echo ""
+          echo "=== Operator Pod Status ==="
+          kubectl describe pods -l app.kubernetes.io/name=deploy-monitor \
+            -n rollout-monitor --context kind-monitor-cluster || true
