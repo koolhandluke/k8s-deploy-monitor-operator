@@ -11,6 +11,7 @@ import (
 // TestHealthyRollout creates a deployment, updates the image to a valid tag,
 // and verifies the investigation result is SUCCESS.
 func TestHealthyRollout(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
@@ -51,6 +52,7 @@ func TestHealthyRollout(t *testing.T) {
 // TestBadImage creates a deployment and sets an image that doesn't exist,
 // expecting a FAILED investigation result.
 func TestBadImage(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
@@ -85,6 +87,7 @@ func TestBadImage(t *testing.T) {
 // TestCrashLoopBackOff creates a deployment and sets an image that will exit
 // immediately (busybox with no command override), causing a crash loop.
 func TestCrashLoopBackOff(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
@@ -119,6 +122,7 @@ func TestCrashLoopBackOff(t *testing.T) {
 // TestMissingConfigMap creates a deployment and patches it to reference a
 // ConfigMap that doesn't exist, causing pod creation failures.
 func TestMissingConfigMap(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
@@ -153,6 +157,7 @@ func TestMissingConfigMap(t *testing.T) {
 // TestRetryAfterFailure sets a bad image, waits for FAILED, then fixes the
 // image and expects a new SUCCESS investigation.
 func TestRetryAfterFailure(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
 	defer cancel()
 

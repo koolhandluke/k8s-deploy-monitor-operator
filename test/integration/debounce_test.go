@@ -11,6 +11,7 @@ import (
 // TestDebouncing triggers three rapid image changes within the 5s debounce
 // window and asserts only one investigation result appears (for the final image).
 func TestDebouncing(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 
