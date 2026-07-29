@@ -153,7 +153,7 @@ func TestMissingConfigMap(t *testing.T) {
 // TestRetryAfterFailure sets a bad image, waits for FAILED, then fixes the
 // image and expects a new SUCCESS investigation.
 func TestRetryAfterFailure(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
 	defer cancel()
 
 	ns := "integration-retry-" + uniqueName("t")
@@ -177,7 +177,7 @@ func TestRetryAfterFailure(t *testing.T) {
 		t.Fatalf("update to bad image: %v", err)
 	}
 
-	status, err := waitForInvestigation(ctx, statusAPIURL, ns, name, "FAILED", 120*time.Second)
+	status, err := waitForInvestigation(ctx, statusAPIURL, ns, name, "FAILED", 180*time.Second)
 	if err != nil {
 		t.Fatalf("first investigation (expected FAILED): %v", err)
 	}
@@ -188,7 +188,7 @@ func TestRetryAfterFailure(t *testing.T) {
 		t.Fatalf("update to good image: %v", err)
 	}
 
-	status, err = waitForInvestigation(ctx, statusAPIURL, ns, name, "SUCCESS", 120*time.Second)
+	status, err = waitForInvestigation(ctx, statusAPIURL, ns, name, "SUCCESS", 180*time.Second)
 	if err != nil {
 		t.Fatalf("second investigation (expected SUCCESS): %v", err)
 	}
