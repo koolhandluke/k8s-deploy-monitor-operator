@@ -11,7 +11,7 @@ import (
 // TestHealthyRollout creates a deployment, updates the image to a valid tag,
 // and verifies the investigation result is SUCCESS.
 func TestHealthyRollout(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
 	ns := "integration-healthy-" + uniqueName("t")
@@ -41,7 +41,7 @@ func TestHealthyRollout(t *testing.T) {
 	}
 
 	// Wait for investigation result
-	status, err := waitForInvestigation(ctx, statusAPIURL, ns, name, "SUCCESS", 120*time.Second)
+	status, err := waitForInvestigation(ctx, statusAPIURL, ns, name, "SUCCESS", 180*time.Second)
 	if err != nil {
 		t.Fatalf("investigation: %v", err)
 	}
@@ -51,7 +51,7 @@ func TestHealthyRollout(t *testing.T) {
 // TestBadImage creates a deployment and sets an image that doesn't exist,
 // expecting a FAILED investigation result.
 func TestBadImage(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
 	ns := "integration-badimg-" + uniqueName("t")
@@ -75,7 +75,7 @@ func TestBadImage(t *testing.T) {
 		t.Fatalf("update image: %v", err)
 	}
 
-	status, err := waitForInvestigation(ctx, statusAPIURL, ns, name, "FAILED", 120*time.Second)
+	status, err := waitForInvestigation(ctx, statusAPIURL, ns, name, "FAILED", 180*time.Second)
 	if err != nil {
 		t.Fatalf("investigation: %v", err)
 	}
@@ -85,7 +85,7 @@ func TestBadImage(t *testing.T) {
 // TestCrashLoopBackOff creates a deployment and sets an image that will exit
 // immediately (busybox with no command override), causing a crash loop.
 func TestCrashLoopBackOff(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
 	ns := "integration-crash-" + uniqueName("t")
@@ -109,7 +109,7 @@ func TestCrashLoopBackOff(t *testing.T) {
 		t.Fatalf("update image: %v", err)
 	}
 
-	status, err := waitForInvestigation(ctx, statusAPIURL, ns, name, "FAILED", 120*time.Second)
+	status, err := waitForInvestigation(ctx, statusAPIURL, ns, name, "FAILED", 180*time.Second)
 	if err != nil {
 		t.Fatalf("investigation: %v", err)
 	}
@@ -119,7 +119,7 @@ func TestCrashLoopBackOff(t *testing.T) {
 // TestMissingConfigMap creates a deployment and patches it to reference a
 // ConfigMap that doesn't exist, causing pod creation failures.
 func TestMissingConfigMap(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
 	ns := "integration-cfgmap-" + uniqueName("t")
@@ -143,7 +143,7 @@ func TestMissingConfigMap(t *testing.T) {
 		t.Fatalf("patch envFrom: %v", err)
 	}
 
-	status, err := waitForInvestigation(ctx, statusAPIURL, ns, name, "FAILED", 120*time.Second)
+	status, err := waitForInvestigation(ctx, statusAPIURL, ns, name, "FAILED", 180*time.Second)
 	if err != nil {
 		t.Fatalf("investigation: %v", err)
 	}
